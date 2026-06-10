@@ -1,0 +1,139 @@
+"""ETF 动量轮动策略回测入口。
+
+用法:
+  python run_rotation.py [--start 2015-01-01] [--end 2026-06-09] [--lookback 20]
+  python run_rotation.py --sensitivity   # 参数敏感性扫描
+
+输出:全区间 / 样本内 / 样本外指标,净值曲线,交易记录。
+"""
+import argparse
+import datetime as dt
+import os
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import pandas as pd
+
+import config
+import data
+import metrics as metrics_mod
+import strategy
+from portfolio import align_prices, run_portfolio_backtest
+
+plt.rcParams["font.sans-serif"] = ["Noto Sans CJK SC", "Noto Sans CJK JP", "SimHei", "Arial Unicode MS", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
+
+
+def load_pool(start: str, end: str) -> dict[str, pd.DataFrame]:
+    prices = {}
+    for symbol, name in config.ETF_POOL.items():
+        print(f"拉取 {name}({symbol}) ...")
+        prices[symbol] = data.get_etf_daily(symbol, start, end)
+    return prices
+
+
+def closes_table(prices: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """收盘价表,只保留所有标的都有行情的共同交易日,与回测引擎日历一致"""
+    common = align_prices(prices)
+    return pd.DataFrame({s: df["close"] for s, df in prices.items()}).loc[common]
+
+
+def report_segment(equity: pd.Series, label: str) -> dict | None:
+    if len(equity) < 2:
+        print(f"\n--- {label}: 区间内无足够数据,跳过 ---")
+        return None
+    m = metrics_mod.equity_metrics(equity)
+    print(f"\n--- {label} ({equity.index[0].date()} ~ {equity.index[-1].date()}) ---")
+    for k, v in m.items():
+        print(f"  {k:<8}: {v:>10.2%}" if k != "夏普比率" else f"  {k:<8}: {v:>10.2f}")
+    return m
+
+
+def run_once(prices: dict[str, pd.DataFrame], lookback: int, buffer: float) -> tuple:
+    closes = closes_table(prices)
+    weights = strategy.etf_momentum_rotation(closes, lookback=lookback, buffer=buffer)
+    result = run_portfolio_backtest(prices, weights, stamp_tax=False)
+    return result, weights
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ETF 动量轮动回测")
+    parser.add_argument("--start", default=config.ROTATION_START)
+    parser.add_argument("--end", default=dt.date.today().isoformat())
+    parser.add_argument("--lookback", type=int, default=config.ROTATION_LOOKBACK)
+    parser.add_argument("--buffer", type=float, default=config.ROTATION_BUFFER)
+    parser.add_argument("--sensitivity", action="store_true", help="lookback 参数敏感性扫描")
+    args = parser.parse_args()
+
+    prices = load_pool(args.start, args.end)
+
+    if args.sensitivity:
+        print(f"\n========== 参数敏感性: lookback 扫描 ==========")
+        rows = []
+        for lb in (10, 15, 20, 25, 30, 40, 60):
+            result, _ = run_once(prices, lb, args.buffer)
+            m = metrics_mod.equity_metrics(result.equity)
+            oos = result.equity.loc[config.OOS_SPLIT:]
+            m_oos = metrics_mod.equity_metrics(oos) if len(oos) >= 2 else None
+            rows.append({
+                "lookback": lb,
+                "全区间年化": f"{m['年化收益率']:.2%}",
+                "全区间回撤": f"{m['最大回撤']:.2%}",
+                "夏普": f"{m['夏普比率']:.2f}",
+                "样本外年化": f"{m_oos['年化收益率']:.2%}" if m_oos else "-",
+                "样本外回撤": f"{m_oos['最大回撤']:.2%}" if m_oos else "-",
+                "交易次数": len(result.trades),
+            })
+        print(pd.DataFrame(rows).to_string(index=False))
+        return
+
+    result, weights = run_once(prices, args.lookback, args.buffer)
+    equity = result.equity
+
+    print(f"\n========== ETF 动量轮动 (lookback={args.lookback}, buffer={args.buffer}) ==========")
+    report_segment(equity, "全区间")
+    report_segment(equity.loc[: config.OOS_SPLIT], "样本内")
+    report_segment(equity.loc[config.OOS_SPLIT:], "样本外")
+
+    # 基准:沪深300
+    benchmark = data.get_benchmark_daily(args.start, args.end)
+    bench = benchmark["close"].reindex(equity.index).ffill()
+    report_segment(bench.dropna(), "沪深300基准")
+
+    # 净值曲线
+    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(equity.index, equity / equity.iloc[0], label="ETF动量轮动", linewidth=1.5)
+    norm_bench = bench / bench.dropna().iloc[0]
+    ax.plot(norm_bench.index, norm_bench, label="沪深300", linewidth=1.2, alpha=0.8)
+    ax.axvline(pd.Timestamp(config.OOS_SPLIT), color="gray", linestyle="--", alpha=0.6, label="样本外分割")
+    ax.set_title("ETF动量轮动 vs 沪深300")
+    ax.set_yscale("log")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    path = os.path.join(config.OUTPUT_DIR, "rotation_equity.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"\n净值曲线已保存: {path}")
+
+    trades_df = result.trades_df()
+    trades_path = os.path.join(config.OUTPUT_DIR, "rotation_trades.csv")
+    trades_df.to_csv(trades_path, index=False, encoding="utf-8-sig")
+    print(f"交易记录已保存: {trades_path} (共 {len(trades_df)} 笔)")
+
+    # 当前持仓信号(用于实盘跟踪)
+    last_w = weights.iloc[-1]
+    held = last_w[last_w > 0]
+    if held.empty:
+        print(f"\n最新信号 ({weights.index[-1].date()}): 空仓持现金")
+    else:
+        names = ", ".join(f"{config.ETF_POOL[s]}({s})" for s in held.index)
+        print(f"\n最新信号 ({weights.index[-1].date()}): 持有 {names}")
+
+    print("\n提示: 回测结果不代表未来收益。")
+
+
+if __name__ == "__main__":
+    main()
