@@ -158,6 +158,27 @@ def main():
                     line += f"(金额不足 1 手/100 股,可忽略)"
                 print(line)
                 changed = True
+        # 持仓与目标对齐:即使信号未变,实际持仓和目标不一致也生成计划
+        # (覆盖"清空流水重新开始"建仓、上次计划未确认成交等场景,计划行每日重写直到确认)
+        for s in config.ETF_POOL:
+            tgt = float(w.get(s, 0.0))
+            held = holdings.get(s, 0)
+            if tgt > 0.005 and held == 0:
+                # 实际空仓时按完整目标权重建仓;差异循环生成的增量买入不足以对齐,予以替换
+                est = int((args.capital or 0) * tgt / last_close[s] // 100) * 100
+                prior = next((o for o in orders if o[0] == "买入" and o[1] == s), None)
+                if prior:
+                    orders.remove(prior)
+                if est >= 100:
+                    orders.append(("买入", s, est))
+                    if prior is None or prior[2] != est:
+                        print(f"  买入 {config.ETF_POOL[s]}({s}): 建仓至目标权重 {tgt:.0%},"
+                              f"约 {est} 股(按昨收 {last_close[s]:.3f} 估算,以明日开盘价为准)")
+                        changed = True
+            elif tgt <= 0.005 and held > 0 and not any(o[0] == "卖出" and o[1] == s for o in orders):
+                orders.append(("卖出", s, held))
+                print(f"  卖出 {config.ETF_POOL[s]}({s}): 目标权重 0,清仓 {held} 股")
+                changed = True
         if not changed:
             print("  无需调仓")
 

@@ -1,1 +1,3 @@
-date,action,symbol,price,shares,amount,note
+date,action,symbol,price,shares,amount,note,status
+2026-06-12,入金,,,,10000,重新开始投入,计划
+2026-06-12,买入,513100,2.143,4600,,"首次建仓,按 2026-06-10 信号,价格为昨收估算,成交后请改价格/股数并将 status 改为 已成交",计划
