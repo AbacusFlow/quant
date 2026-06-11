@@ -73,6 +73,7 @@ def run_portfolio_backtest(
     initial_capital: float = config.INITIAL_CAPITAL,
     stamp_tax: bool = False,
     slippage: float = config.SLIPPAGE_RATE,
+    rebalance_band: float = config.REBALANCE_BAND,
 ) -> PortfolioResult:
     """逐日模拟组合调仓。
 
@@ -99,8 +100,14 @@ def run_portfolio_backtest(
         equity_open = cash + sum(shares[s] * opens[s] for s in symbols)
         desired = {}
         for s in symbols:
-            tgt_value = equity_open * target.at[date, s]
+            tgt_w = target.at[date, s]
+            tgt_value = equity_open * tgt_w
             desired[s] = int(tgt_value / opens[s] // 100) * 100 if tgt_value > 0 else 0
+            # 再平衡带宽:偏离金额过小不交易,避免每日漂移再平衡的费用拖累
+            # (按原始目标权重判断清仓:仅权重为 0 的真清仓不受带宽限制,
+            #  避免正权重因整手取整为 0 而被误清仓)
+            if tgt_w > 0 and abs(desired[s] - shares[s]) * opens[s] < rebalance_band * equity_open:
+                desired[s] = shares[s]
 
         # 先卖
         for s in symbols:

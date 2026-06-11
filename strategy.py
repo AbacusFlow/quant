@@ -111,6 +111,43 @@ def etf_momentum_rotation(
     return weights
 
 
+def etf_momentum_ensemble(
+    closes: pd.DataFrame,
+    lookbacks: tuple[int, ...] = (15, 20, 25),
+    buffer: float = 0.01,
+) -> pd.DataFrame:
+    """多周期集成轮动:多个 lookback 子策略各占等权,降低单一参数过拟合风险。
+
+    返回:目标权重表,每行权重和 <= 1(子策略空仓时对应份额持现金)
+    """
+    tables = [etf_momentum_rotation(closes, lookback=lb, buffer=buffer) for lb in lookbacks]
+    combined = tables[0].copy()
+    for t in tables[1:]:
+        combined += t
+    return combined / len(lookbacks)
+
+
+def apply_drawdown_control(
+    weights: pd.DataFrame,
+    closes: pd.DataFrame,
+    ma_window: int = 60,
+    scale: float = 0.5,
+) -> pd.DataFrame:
+    """回撤控制:策略虚拟净值跌破其 ma_window 日均线时,目标仓位乘以 scale。
+
+    虚拟净值由未缩放权重的收盘-收盘收益构造(权重移1日对齐 T+1 执行),
+    T 日的控制信号只用到 T 日及之前的收盘价,无前视。
+    """
+    rets = closes.pct_change(fill_method=None).fillna(0.0)
+    strat_ret = (weights.shift(1).fillna(0.0) * rets).sum(axis=1)
+    virtual = (1 + strat_ret).cumprod()
+    ma = virtual.rolling(ma_window).mean()
+
+    factor = pd.Series(1.0, index=weights.index)
+    factor[virtual < ma] = scale
+    return weights.mul(factor, axis=0)
+
+
 # 策略注册表:名称 -> (函数, 说明)
 STRATEGIES = {
     "dual_ma": (dual_ma_signal, "双均线金叉/死叉"),

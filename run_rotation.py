@@ -51,9 +51,23 @@ def report_segment(equity: pd.Series, label: str) -> dict | None:
     return m
 
 
-def run_once(prices: dict[str, pd.DataFrame], lookback: int, buffer: float) -> tuple:
+def build_weights(closes: pd.DataFrame, mode: str, lookback: int, buffer: float,
+                  dd_control: bool) -> pd.DataFrame:
+    """根据模式生成目标权重(可选叠加回撤控制)"""
+    if mode == "single":
+        weights = strategy.etf_momentum_rotation(closes, lookback=lookback, buffer=buffer)
+    else:
+        weights = strategy.etf_momentum_ensemble(closes, lookbacks=config.ENSEMBLE_LOOKBACKS, buffer=buffer)
+    if dd_control:
+        weights = strategy.apply_drawdown_control(
+            weights, closes, ma_window=config.DD_MA_WINDOW, scale=config.DD_SCALE)
+    return weights
+
+
+def run_once(prices: dict[str, pd.DataFrame], lookback: int, buffer: float,
+             mode: str = "single", dd_control: bool = False) -> tuple:
     closes = closes_table(prices)
-    weights = strategy.etf_momentum_rotation(closes, lookback=lookback, buffer=buffer)
+    weights = build_weights(closes, mode, lookback, buffer, dd_control)
     result = run_portfolio_backtest(prices, weights, stamp_tax=False)
     return result, weights
 
@@ -65,9 +79,39 @@ def main():
     parser.add_argument("--lookback", type=int, default=config.ROTATION_LOOKBACK)
     parser.add_argument("--buffer", type=float, default=config.ROTATION_BUFFER)
     parser.add_argument("--sensitivity", action="store_true", help="lookback 参数敏感性扫描")
+    parser.add_argument("--mode", choices=("single", "ensemble"), default="ensemble",
+                        help="single=单一lookback, ensemble=多周期集成(默认)")
+    parser.add_argument("--dd", action="store_true",
+                        help="开启回撤控制(回测显示年化损耗约3%%、回撤仅改善约2pp,默认关闭)")
+    parser.add_argument("--compare", action="store_true", help="对比 单一/集成/集成+回撤控制")
     args = parser.parse_args()
 
     prices = load_pool(args.start, args.end)
+
+    if args.compare:
+        print("\n========== 策略变体对比 ==========")
+        variants = [
+            (f"单一lookback{args.lookback}", "single", False),
+            ("集成15/20/25", "ensemble", False),
+            ("集成+回撤控制", "ensemble", True),
+        ]
+        rows = []
+        for label, mode, dd in variants:
+            result, _ = run_once(prices, args.lookback, args.buffer, mode=mode, dd_control=dd)
+            m = metrics_mod.equity_metrics(result.equity)
+            oos = result.equity.loc[config.OOS_SPLIT:]
+            m_oos = metrics_mod.equity_metrics(oos) if len(oos) >= 2 else None
+            rows.append({
+                "策略": label,
+                "全区间年化": f"{m['年化收益率']:.2%}",
+                "全区间回撤": f"{m['最大回撤']:.2%}",
+                "夏普": f"{m['夏普比率']:.2f}",
+                "样本外年化": f"{m_oos['年化收益率']:.2%}" if m_oos else "-",
+                "样本外回撤": f"{m_oos['最大回撤']:.2%}" if m_oos else "-",
+                "交易次数": len(result.trades),
+            })
+        print(pd.DataFrame(rows).to_string(index=False))
+        return
 
     if args.sensitivity:
         print(f"\n========== 参数敏感性: lookback 扫描 ==========")
@@ -89,10 +133,14 @@ def main():
         print(pd.DataFrame(rows).to_string(index=False))
         return
 
-    result, weights = run_once(prices, args.lookback, args.buffer)
+    dd_control = args.dd
+    result, weights = run_once(prices, args.lookback, args.buffer, mode=args.mode, dd_control=dd_control)
     equity = result.equity
 
-    print(f"\n========== ETF 动量轮动 (lookback={args.lookback}, buffer={args.buffer}) ==========")
+    desc = f"mode={args.mode}, 回撤控制={'开' if dd_control else '关'}, buffer={args.buffer}"
+    if args.mode == "single":
+        desc += f", lookback={args.lookback}"
+    print(f"\n========== ETF 动量轮动 ({desc}) ==========")
     report_segment(equity, "全区间")
     report_segment(equity.loc[: config.OOS_SPLIT], "样本内")
     report_segment(equity.loc[config.OOS_SPLIT:], "样本外")
@@ -129,8 +177,10 @@ def main():
     if held.empty:
         print(f"\n最新信号 ({weights.index[-1].date()}): 空仓持现金")
     else:
-        names = ", ".join(f"{config.ETF_POOL[s]}({s})" for s in held.index)
-        print(f"\n最新信号 ({weights.index[-1].date()}): 持有 {names}")
+        names = ", ".join(f"{config.ETF_POOL[s]}({s}) {w:.0%}" for s, w in held.items())
+        cash_w = 1 - held.sum()
+        suffix = f",现金 {cash_w:.0%}" if cash_w > 0.005 else ""
+        print(f"\n最新信号 ({weights.index[-1].date()}): {names}{suffix}")
 
     print("\n提示: 回测结果不代表未来收益。")
 

@@ -32,8 +32,12 @@ ETF_POOL = {
     "513100": "纳指ETF",
     "518880": "黄金ETF",
 }
-ROTATION_LOOKBACK = 20      # 动量回看天数
+ROTATION_LOOKBACK = 20      # 动量回看天数(single 模式)
 ROTATION_BUFFER = 0.01      # 换仓缓冲:新标的动量需超过当前持仓 1% 才切换
+ENSEMBLE_LOOKBACKS = (15, 20, 25)  # 集成模式的多周期组合
+DD_MA_WINDOW = 60           # 回撤控制:虚拟净值均线窗口
+DD_SCALE = 0.5              # 跌破均线时仓位缩放系数
+REBALANCE_BAND = 0.02       # 再平衡带宽:目标与当前持仓偏离 < 2% 总资产时不交易
 ROTATION_START = "2015-01-01"
 OOS_SPLIT = "2022-01-01"    # 样本内/样本外分割点
 
