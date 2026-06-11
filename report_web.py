@@ -125,6 +125,187 @@ def build_equity_chart(equity: pd.Series, bench: pd.Series, ew: pd.Series,
     return fig_to_b64(fig)
 
 
+EXEC_PATH = os.path.join(config.OUTPUT_DIR, "executions.csv")
+ACTION_ALIASES = {
+    "买入": "buy", "buy": "buy",
+    "卖出": "sell", "sell": "sell",
+    "入金": "deposit", "deposit": "deposit",
+    "出金": "withdraw", "withdraw": "withdraw",
+}
+
+
+def load_executions() -> pd.DataFrame | None:
+    """读取手工维护的实盘成交记录;只有表头(无数据行)视为尚未实盘。
+
+    列: date,action,symbol,price,shares,amount,note
+    - action: 入金/出金(amount 必填)、买入/卖出(symbol/price/shares 必填,
+      amount 选填 = 券商实际发生金额,不填则按 价格*股数±默认佣金 估算)
+    手工输入是边界,这里做显式校验,错误信息带行号方便在 GitHub 上改。
+    """
+    if not os.path.exists(EXEC_PATH):
+        return None
+    df = pd.read_csv(EXEC_PATH, encoding="utf-8-sig", dtype={"symbol": str})
+    if df.empty:
+        return None
+    raw_action = df["action"].astype(str).str.strip()
+    df["action"] = raw_action.str.lower().map(ACTION_ALIASES)
+    df["symbol"] = df["symbol"].astype(str).str.strip()
+    parsed_date = pd.to_datetime(df["date"], errors="coerce")
+    for col in ("price", "shares", "amount"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    for i, r in df.iterrows():
+        rowno = i + 2  # 含表头的 CSV 行号
+        if pd.isna(r["action"]):
+            raise ValueError(f"第 {rowno} 行 action 无效: {raw_action[i]}(应为 买入/卖出/入金/出金)")
+        if pd.isna(parsed_date[i]):
+            raise ValueError(f"第 {rowno} 行日期无效: {r['date']}")
+        if pd.notna(r["amount"]) and float(r["amount"]) <= 0:
+            raise ValueError(f"第 {rowno} 行 amount 必须为正数")
+        if r["action"] in ("deposit", "withdraw"):
+            if pd.isna(r["amount"]):
+                raise ValueError(f"第 {rowno} 行 {raw_action[i]} 必须填正数 amount(金额)")
+        else:
+            if r["symbol"] not in config.ETF_POOL:
+                raise ValueError(f"第 {rowno} 行 symbol 不在 ETF 池: {r['symbol']}")
+            if pd.isna(r["price"]) or float(r["price"]) <= 0 or pd.isna(r["shares"]) or float(r["shares"]) <= 0:
+                raise ValueError(f"第 {rowno} 行买卖必须填正数 price 和 shares")
+            if float(r["shares"]) != int(r["shares"]):
+                raise ValueError(f"第 {rowno} 行 shares 必须为整数股")
+    df["date"] = parsed_date
+    return df.sort_values("date", kind="stable").reset_index(drop=True)
+
+
+def real_equity_series(execs: pd.DataFrame, closes: pd.DataFrame) -> tuple[pd.Series, pd.Series, float]:
+    """根据成交流水重建真实账户。返回 (每日总资产, 份额化净值 NAV, 累计净入金)。
+
+    NAV 采用份额化(TWR)口径(标准基金记账):当日收盘 NAV 先剔除当日净流入
+    计算,再按该 NAV 折算份额增减。追加/抽回资金不扭曲历史收益曲线,
+    可与模拟盘/基准直接比较。
+    """
+    last_quote = closes.index[-1]
+    future = execs[execs["date"] > last_quote]
+    if not future.empty:
+        raise ValueError(f"流水日期 {future['date'].iloc[0].date()} 晚于最新行情 {last_quote.date()},"
+                         "请等行情更新后再录入或修正日期")
+    cash = 0.0
+    net_deposit = 0.0
+    units = 0.0  # 份额
+    nav = 1.0
+    pos: dict[str, int] = {s: 0 for s in config.ETF_POOL}
+    first = execs["date"].min()
+    days = closes.index[closes.index >= first.normalize()]
+    if days.empty:
+        days = closes.index[-1:]
+    applied = pd.Series(False, index=execs.index)
+    equity = pd.Series(dtype=float)
+    navs = pd.Series(dtype=float)
+    for day in days:
+        todo = execs.index[(~applied) & (execs["date"] <= day)]
+        flow_today = 0.0  # 当日净流入,日终按剔除流入后的 NAV 折份额
+        for i in todo:
+            r = execs.loc[i]
+            if r["action"] == "deposit":
+                amt = float(r["amount"])
+                cash += amt; net_deposit += amt; flow_today += amt
+            elif r["action"] == "withdraw":
+                amt = float(r["amount"])
+                cash -= amt; net_deposit -= amt; flow_today -= amt
+                if cash < -0.01:
+                    raise ValueError(f"{r['date'].date()} 出金后现金为负,请检查流水")
+            else:
+                gross = float(r["price"]) * int(r["shares"])
+                fee_default = max(gross * config.ETF_COMMISSION_RATE, config.COMMISSION_MIN)
+                if r["action"] == "buy":
+                    cost = float(r["amount"]) if pd.notna(r["amount"]) else gross + fee_default
+                    cash -= cost
+                    pos[r["symbol"]] += int(r["shares"])
+                    if cash < -0.01:
+                        raise ValueError(f"{r['date'].date()} 买入 {r['symbol']} 后现金为负,"
+                                         "请检查流水(是否漏记入金或金额多写)")
+                else:
+                    proceeds = float(r["amount"]) if pd.notna(r["amount"]) else gross - fee_default
+                    cash += proceeds
+                    pos[r["symbol"]] -= int(r["shares"])
+                    if pos[r["symbol"]] < 0:
+                        raise ValueError(f"{r['date'].date()} 卖出 {r['symbol']} 后持仓为负,请检查流水")
+            applied[i] = True
+        eq = cash + sum(pos[s] * closes.at[day, s] for s in config.ETF_POOL)
+        equity.at[day] = eq
+        if units > 1e-9:
+            nav = (eq - flow_today) / units  # 当日收益归属于既有份额
+        if flow_today != 0.0:
+            units += flow_today / nav
+            if units < -1e-9:
+                raise ValueError(f"{day.date()} 出金超过账户份额,请检查流水")
+        navs.at[day] = nav
+    return equity, navs, net_deposit
+
+
+def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Series) -> str:
+    """实盘板块 HTML;无记录给操作指引,解析失败给出错误而不中断整页生成。"""
+    guide = ('<p class="note">记录方法:在 GitHub 编辑 <code>output/executions.csv</code> 加一行,'
+             '列为 date,action,symbol,price,shares,amount,note。'
+             '入金如 <code>2026-06-12,入金,,,,10000,初始入金</code>;'
+             '买入如 <code>2026-06-12,买入,513100,1.234,4900,,</code>'
+             '(amount 选填=券商实际发生金额,含手续费更准)。没操作就不加行。</p>')
+    try:
+        execs = load_executions()
+    except (ValueError, KeyError) as e:
+        return (f'<h2>实盘 vs 模拟</h2><p style="color:#c00">executions.csv 解析失败:'
+                f'{html.escape(str(e))}</p>{guide}')
+    if execs is None:
+        return f'<h2>实盘 vs 模拟</h2><p class="note">尚无实盘成交记录。</p>{guide}'
+
+    try:
+        real_eq, navs, net_deposit = real_equity_series(execs, closes)
+    except ValueError as e:
+        return (f'<h2>实盘 vs 模拟</h2><p style="color:#c00">实盘净值计算失败:'
+                f'{html.escape(str(e))}</p>{guide}')
+
+    start = real_eq.index[0]
+    sim = sim_equity.loc[start:]
+    b = bench.loc[start:].dropna()
+    fig, ax = plt.subplots(figsize=(11, 5))
+    ax.plot(navs.index, navs, label="实盘账户(份额化净值,追加资金不扭曲)", linewidth=1.8, color="#d62728")
+    if len(sim) >= 2:
+        ax.plot(sim.index, sim / sim.iloc[0], label="模拟盘(策略理论执行)", linewidth=1.3,
+                color="#ff9896", linestyle="--")
+    if len(b) >= 2:
+        ax.plot(b.index, b / b.iloc[0], label="沪深300(不操作)", linewidth=1.2, color="#7f7f7f")
+    ax.set_title(f"实盘净值对比(自 {start.date()},起始净值 1.0)")
+    ax.legend(); ax.grid(alpha=0.3)
+    img = fig_to_b64(fig)
+
+    real_ret = navs.iloc[-1] - 1  # 份额化(TWR)收益,不受入金/出金时点影响
+    sim_ret = sim.iloc[-1] / sim.iloc[0] - 1 if len(sim) >= 2 else float("nan")
+    cards = (f'<div class="cards">'
+             f'<div class="card"><div class="card-label">实盘累计收益(份额化)</div>'
+             f'<div class="card-value {color_cls(real_ret)}">{pct(real_ret)}</div></div>'
+             f'<div class="card"><div class="card-label">同期模拟盘</div>'
+             f'<div class="card-value {color_cls(sim_ret)}">{pct(sim_ret)}</div></div>'
+             f'<div class="card"><div class="card-label">执行偏差(实盘-模拟)</div>'
+             f'<div class="card-value {color_cls(real_ret - sim_ret)}">{pct(real_ret - sim_ret)}</div></div>'
+             f'<div class="card"><div class="card-label">当前总资产</div>'
+             f'<div class="card-value">{real_eq.iloc[-1]:,.0f} 元</div></div>'
+             f'<div class="card"><div class="card-label">累计净入金</div>'
+             f'<div class="card-value">{net_deposit:,.0f} 元</div></div></div>')
+
+    act_cn = {"buy": "买入", "sell": "卖出", "deposit": "入金", "withdraw": "出金"}
+    rows = ""
+    for _, r in execs.iloc[::-1].head(30).iterrows():
+        name = config.ETF_POOL.get(str(r.get("symbol", "")), "")
+        detail = (f"{name}({r['symbol']}) {r['price']} x {int(r['shares'])}股"
+                  if r["action"] in ("buy", "sell") else f"{float(r['amount']):,.0f} 元")
+        note = "" if pd.isna(r.get("note")) else str(r["note"])
+        rows += (f'<tr><td>{r["date"].date()}</td><td>{act_cn[r["action"]]}</td>'
+                 f'<td>{html.escape(detail)}</td><td>{html.escape(note)}</td></tr>')
+    return (f'<h2>实盘 vs 模拟</h2>{cards}'
+            f'<img src="data:image/png;base64,{img}" alt="实盘净值">'
+            f'<h3>成交流水(最近 30 条)</h3>'
+            f'<table><tr><th>日期</th><th>操作</th><th>明细</th><th>备注</th></tr>{rows}</table>'
+            f'{guide}')
+
+
 def main():
     parser = argparse.ArgumentParser(description="生成静态网页报告")
     parser.add_argument("--mode", choices=("single", "ensemble"), default="single")
@@ -231,6 +412,8 @@ img {{ max-width: 100%; background: #fff; border-radius: 6px; box-shadow: 0 1px 
   vs 沪深300买入持有 <b>{pct(m_bench_oos['年化收益率'], signed=False)}</b>
   (超额 <b class="{color_cls(edge_oos)}">{pct(edge_oos)}</b>/年)</div>
 </div>
+
+{real_account_html(closes, equity, bench)}
 
 <h2>净值对比:操作 vs 不操作</h2>
 <img src="data:image/png;base64,{img_full}" alt="全区间净值">

@@ -3,6 +3,7 @@ __pycache__/
 data/
 output/*
 !output/signal_log.csv
+!output/executions.csv
 site/
 .DS_Store
 .env
