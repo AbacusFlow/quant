@@ -1,6 +1,7 @@
-"""模拟盘每日信号:收盘后运行,输出最新目标持仓并记录到 output/signal_log.csv。
+"""模拟盘每日信号:每个交易日早上开盘前运行(基于前一交易日收盘数据),
+输出最新目标持仓并记录到 output/signal_log.csv,调仓当日开盘执行。
 
-用法(每个交易日收盘后):
+用法(每个交易日开盘前;收盘后运行也可,但数据源当日日线通常夜间才发布):
   python daily_signal.py [--mode single|ensemble] [--capital 10000]
 
 模式说明:
@@ -9,7 +10,7 @@
 
 输出:
 - 最新目标权重(不带回撤控制,与 run_rotation.py 对应模式回测口径一致)
-- 与上次记录的信号对比,给出调仓指令(次日开盘执行)
+- 与上次记录的信号对比,给出调仓指令(信号日的下一交易日开盘执行,早上运行即当日开盘)
 - 信号历史追加到 output/signal_log.csv(含 mode 列,口径变更可追溯)
 """
 import argparse
@@ -75,14 +76,26 @@ def current_holdings(execs: pd.DataFrame) -> dict[str, int]:
     return {s: n for s, n in hold.items() if n > 0}
 
 
+def next_trade_date(after) -> dt.date:
+    """信号日之后的第一个 A 股交易日;交易日历不可用时退化为下一工作日"""
+    try:
+        cal = data.get_trade_dates()
+        nxt = cal[cal > pd.Timestamp(after)]
+        if len(nxt):
+            return nxt[0].date()
+    except Exception:
+        pass
+    return (pd.Timestamp(after) + pd.tseries.offsets.BDay(1)).date()
+
+
 def write_planned(signal_date, orders: list[tuple[str, str, int]], last_close: pd.Series):
     """把次日调仓计划写入 executions.csv(status=计划),用户成交后改为已成交。
 
     - 价格为信号日收盘估算,股数为预估,实际以用户回填为准
-    - 执行日按下一工作日估算(无法预知 A 股节假日),逢节假日顺延,请用户按实际成交日修正 date
+    - 执行日取交易日历中信号日的下一交易日;日历不可用时退化为下一工作日(此时逢节假日需用户修正 date)
     - 旧计划行(过期或被新信号取代)先全部清除,再写入本次计划,天然幂等
     """
-    exec_date = (pd.Timestamp(signal_date) + pd.tseries.offsets.BDay(1)).date()
+    exec_date = next_trade_date(signal_date)
     df = _load_executions_raw()
     stale = int((df["status"] == "计划").sum())
     df = df[df["status"] != "计划"]  # 清除所有旧计划(过期或被新信号取代)
@@ -110,7 +123,17 @@ def main():
     if args.capital is not None and (not math.isfinite(args.capital) or args.capital <= 0):
         parser.error("--capital 必须是正数")
 
-    end = dt.date.today().isoformat()
+    today = dt.date.today()
+    try:
+        # 非交易日(节假日/周末)跳过:避免假期早上推送"今日执行"、又因幂等
+        # 挡掉真正开市日的推送;日历不可用时保持原行为(幂等仍兜底)
+        if pd.Timestamp(today) not in data.get_trade_dates():
+            print(f"{today} 非A股交易日,跳过信号记录与计划生成")
+            return
+    except Exception as e:
+        print(f"(交易日历不可用,继续运行: {e})")
+
+    end = today.isoformat()
     w, last_close = latest_weights(end, args.mode)
     signal_date = w.name.date()
 
@@ -134,7 +157,7 @@ def main():
     orders: list[tuple[str, str, int]] = []
     changed = False
     if prev is not None:
-        print("\n--- 调仓指令(次日开盘执行)---")
+        print("\n--- 调仓指令(下一交易日开盘执行)---")
         holdings = current_holdings(_load_executions_raw())
         for s in config.ETF_POOL:
             old = float(prev.get(s, 0.0))
@@ -152,7 +175,7 @@ def main():
                     est = int((args.capital or 0) * abs(new - old) / last_close[s] // 100) * 100
                 line = f"  {action} {config.ETF_POOL[s]}({s}): 目标权重 {old:.0%} -> {new:.0%}"
                 if est >= 100:
-                    line += f",约 {est} 股(按昨收 {last_close[s]:.3f} 估算,以明日开盘价为准)"
+                    line += f",约 {est} 股(按昨收 {last_close[s]:.3f} 估算,以执行日开盘价为准)"
                     orders.append((action, s, est))
                 elif args.capital:
                     line += f"(金额不足 1 手/100 股,可忽略)"
@@ -173,7 +196,7 @@ def main():
                     orders.append(("买入", s, est))
                     if prior is None or prior[2] != est:
                         print(f"  买入 {config.ETF_POOL[s]}({s}): 建仓至目标权重 {tgt:.0%},"
-                              f"约 {est} 股(按昨收 {last_close[s]:.3f} 估算,以明日开盘价为准)")
+                              f"约 {est} 股(按昨收 {last_close[s]:.3f} 估算,以执行日开盘价为准)")
                         changed = True
             elif tgt <= 0.005 and held > 0 and not any(o[0] == "卖出" and o[1] == s for o in orders):
                 orders.append(("卖出", s, held))

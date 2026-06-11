@@ -20,7 +20,7 @@ docker run --rm -v "$PWD":/work quant python run_rotation.py --end 2026-06-09
 docker run --rm -v "$PWD":/work quant python run_rotation.py --sensitivity   # lookback scan
 docker run --rm -v "$PWD":/work quant python run_rotation.py --compare       # single vs ensemble vs ensemble+dd
 
-# Paper-trading daily signal (run after market close; appends to output/signal_log.csv)
+# Paper-trading daily signal (run before market open, uses previous close; appends to output/signal_log.csv)
 docker run --rm -v "$PWD":/work quant python daily_signal.py
 
 # Single-asset dual-MA demo

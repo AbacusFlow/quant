@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# 模拟盘信号自动跑 + Server酱微信推送。
-# cron(交易日收盘后,17:35 为兜底:信号重复时仅补发未送达的推送):
-#   35 16 * * 1-5  /home/logan/Projects/quant/scripts/daily_signal_push.sh
-#   35 17 * * 1-5  /home/logan/Projects/quant/scripts/daily_signal_push.sh
+# 模拟盘信号自动跑 + Server酱微信推送(手动备用;正式自动化在 GitHub Actions)。
+# cron(交易日早上开盘前,基于前一交易日收盘;09:05 为兜底:信号重复时仅补发未送达的推送):
+#   35 8 * * 1-5  /home/logan/Projects/quant/scripts/daily_signal_push.sh
+#   5  9 * * 1-5  /home/logan/Projects/quant/scripts/daily_signal_push.sh
 set -uo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -67,18 +67,23 @@ $OUTPUT"
     exit 1
 fi
 
-# 信号已记录过(节假日/兜底运行)→ 无新消息,退出码反映补发结果
-if echo "$OUTPUT" | grep -q "不重复记录"; then
+# 信号已记录过(兜底运行)或非交易日 → 无新消息,退出码反映补发结果
+if echo "$OUTPUT" | grep -qE "不重复记录|非A股交易日"; then
     exit $BACKLOG_STATUS
 fi
 
 SIGNAL=$(echo "$OUTPUT" | grep "目标持仓" | head -1)
+# 未解析到目标持仓(意外输出格式)→ 不入队,避免推空消息
+if [ -z "$SIGNAL" ]; then
+    echo "(未解析到目标持仓,跳过推送)" >> "$RUN_LOG"
+    exit $BACKLOG_STATUS
+fi
 if echo "$OUTPUT" | grep -qE "买入|卖出"; then
     ORDERS=$(echo "$OUTPUT" | grep -E "买入|卖出")
-    enqueue "[量化] 明早需调仓!
+    enqueue "[量化] 今早开盘需调仓!
 $SIGNAL
 
-调仓指令(明日开盘执行):
+调仓指令(今日开盘 09:30 执行):
 $ORDERS"
 else
     enqueue "[量化] 今日无操作

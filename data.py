@@ -174,6 +174,24 @@ def get_etf_daily(symbol: str, start: str, end: str) -> pd.DataFrame:
     return df
 
 
+def get_trade_dates() -> pd.DatetimeIndex:
+    """A股交易日历(新浪源,含未来已公布日期),本地缓存;缓存覆盖不足未来30天时刷新"""
+    path = os.path.join(config.DATA_DIR, "trade_dates.csv")
+    today = pd.Timestamp.today().normalize()
+    if os.path.exists(path):
+        df = pd.read_csv(path, parse_dates=["trade_date"])
+        if not df.empty and df["trade_date"].max() >= today + pd.Timedelta(days=30):
+            return pd.DatetimeIndex(df["trade_date"])
+
+    import akshare as ak
+
+    raw = _retry(lambda: ak.tool_trade_date_hist_sina())
+    df = pd.DataFrame({"trade_date": pd.to_datetime(raw["trade_date"])}).sort_values("trade_date")
+    os.makedirs(config.DATA_DIR, exist_ok=True)
+    df.to_csv(path, index=False)
+    return pd.DatetimeIndex(df["trade_date"])
+
+
 def get_benchmark_daily(start: str, end: str) -> pd.DataFrame:
     """沪深300指数日线,列: close"""
     path = _cache_path(f"index_{config.BENCHMARK_SYMBOL}", start, end)

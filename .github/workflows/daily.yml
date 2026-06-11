@@ -1,12 +1,13 @@
-# 每个交易日收盘后:跑信号 → 微信推送 → 提交信号日志 → 生成并部署 Pages 报告。
+# 每个交易日早上开盘前:跑信号(基于前一交易日收盘,数据源夜间已更新)→ 微信推送 →
+# 提交信号日志 → 生成并部署 Pages 报告。推送到手后当天开盘(9:30)即可执行。
 # 两个触发时间互为兜底(同一信号日期+模式幂等,不会重复记录/推送)。
 # 节假日无新数据时信号日期不变,自动跳过推送。
 name: daily-signal
 
 on:
   schedule:
-    - cron: "38 8 * * 1-5"   # 北京时间 16:38(UTC+8)
-    - cron: "38 9 * * 1-5"   # 北京时间 17:38 兜底
+    - cron: "32 0 * * 1-5"   # 香港时间 08:32(UTC+8)
+    - cron: "2 1 * * 1-5"    # 香港时间 09:02 兜底(开盘 09:30 前)
   workflow_dispatch:
 
 permissions:
@@ -71,9 +72,9 @@ jobs:
           if [ -z "$SENDKEY" ]; then echo "未配置 SENDKEY,跳过推送"; exit 0; fi
           SIGNAL=$(grep "目标持仓" signal_output.txt | head -1)
           if grep -qE "买入|卖出" signal_output.txt; then
-            TITLE="[量化] 明早需调仓!"
+            TITLE="[量化] 今早开盘需调仓!"
             BODY="$SIGNAL
-          调仓指令(明日开盘执行):
+          调仓指令(今日开盘 09:30 执行):
           $(grep -E '买入|卖出' signal_output.txt)"
           else
             TITLE="[量化] 今日无操作"
