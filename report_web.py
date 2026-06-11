@@ -405,6 +405,8 @@ img {{ max-width: 100%; background: #fff; border-radius: 6px; box-shadow: 0 1px 
 <h1>ETF 动量轮动 — 模拟盘报告</h1>
 <p class="note">更新于 {now}(数据截至 {signal_date})· mode={args.mode} · 本金 {args.capital:,.0f} 元 · 回测含佣金/滑点/整手约束 · A股红涨绿跌</p>
 
+{real_account_html(closes, equity, bench)}
+
 <div class="banner">
   <div class="big">最新信号:{html.escape(latest)}</div>
   <div style="margin-top:6px">{verdict}:样本外({config.OOS_SPLIT} 至今)策略年化
@@ -412,8 +414,6 @@ img {{ max-width: 100%; background: #fff; border-radius: 6px; box-shadow: 0 1px 
   vs 沪深300买入持有 <b>{pct(m_bench_oos['年化收益率'], signed=False)}</b>
   (超额 <b class="{color_cls(edge_oos)}">{pct(edge_oos)}</b>/年)</div>
 </div>
-
-{real_account_html(closes, equity, bench)}
 
 <h2>净值对比:操作 vs 不操作</h2>
 <img src="data:image/png;base64,{img_full}" alt="全区间净值">
