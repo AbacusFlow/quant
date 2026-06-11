@@ -52,7 +52,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add output/signal_log.csv
+          git add output/signal_log.csv output/executions.csv
           if git diff --cached --quiet; then
             echo "日志无变化"
             echo "new_signal=false" >> "$GITHUB_OUTPUT"

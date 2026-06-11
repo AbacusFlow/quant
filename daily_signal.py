@@ -24,6 +24,8 @@ import data
 from run_rotation import build_weights, closes_table
 
 LOG_PATH = os.path.join(config.OUTPUT_DIR, "signal_log.csv")
+EXEC_PATH = os.path.join(config.OUTPUT_DIR, "executions.csv")
+EXEC_COLS = ["date", "action", "symbol", "price", "shares", "amount", "note", "status"]
 
 
 def latest_weights(end: str, mode: str) -> tuple[pd.Series, pd.Series]:
@@ -48,6 +50,54 @@ def describe(w: pd.Series) -> str:
     if cash > 0.005:
         parts.append(f"现金 {cash:.0%}")
     return ", ".join(parts)
+
+
+def _load_executions_raw() -> pd.DataFrame:
+    if not os.path.exists(EXEC_PATH):
+        return pd.DataFrame(columns=EXEC_COLS)
+    df = pd.read_csv(EXEC_PATH, dtype={"symbol": str}, encoding="utf-8-sig")
+    if "status" not in df.columns:
+        df["status"] = ""
+    df["status"] = df["status"].fillna("").astype(str).str.strip()  # 与 report_web.py 口径一致
+    return df.reindex(columns=EXEC_COLS)
+
+
+def current_holdings(execs: pd.DataFrame) -> dict[str, int]:
+    """已成交流水推算当前持仓(计划行不算)"""
+    hold: dict[str, int] = {}
+    for _, r in execs[execs["status"] != "计划"].iterrows():
+        a = str(r["action"]).strip().lower()
+        a = {"买入": "buy", "卖出": "sell"}.get(str(r["action"]).strip(), a)
+        if a in ("buy", "sell"):
+            s = str(r["symbol"]).strip()
+            n = int(float(r["shares"]))
+            hold[s] = hold.get(s, 0) + (n if a == "buy" else -n)
+    return {s: n for s, n in hold.items() if n > 0}
+
+
+def write_planned(signal_date, orders: list[tuple[str, str, int]], last_close: pd.Series):
+    """把次日调仓计划写入 executions.csv(status=计划),用户成交后改为已成交。
+
+    - 价格为信号日收盘估算,股数为预估,实际以用户回填为准
+    - 执行日按下一工作日估算(无法预知 A 股节假日),逢节假日顺延,请用户按实际成交日修正 date
+    - 旧计划行(过期或被新信号取代)先全部清除,再写入本次计划,天然幂等
+    """
+    exec_date = (pd.Timestamp(signal_date) + pd.tseries.offsets.BDay(1)).date()
+    df = _load_executions_raw()
+    stale = int((df["status"] == "计划").sum())
+    df = df[df["status"] != "计划"]  # 清除所有旧计划(过期或被新信号取代)
+    if not orders and not stale:
+        return  # 无新计划也无旧计划,不动文件
+    rows = []
+    for action, symbol, shares in orders:
+        rows.append({"date": str(exec_date), "action": action, "symbol": symbol,
+                     "price": round(float(last_close[symbol]), 3), "shares": shares,
+                     "amount": "", "note": f"按 {signal_date} 信号,日期为下一工作日估算(节假日顺延)、价格为昨收估算,成交后请改日期/价格/股数并将 status 改为 已成交",
+                     "status": "计划"})
+    out = pd.concat([df, pd.DataFrame(rows, columns=EXEC_COLS)], ignore_index=True)
+    out["shares"] = pd.to_numeric(out["shares"], errors="coerce").astype("Int64")
+    out.to_csv(EXEC_PATH, index=False, encoding="utf-8", float_format="%.10g")
+    print(f"次日操作计划已写入: {EXEC_PATH}({len(rows)} 条,执行日 {exec_date})")
 
 
 def main():
@@ -81,21 +131,31 @@ def main():
         print("(同一信号日期、同一模式已记录,不重复记录)")
         return
 
+    orders: list[tuple[str, str, int]] = []
+    changed = False
     if prev is not None:
         print("\n--- 调仓指令(次日开盘执行)---")
-        changed = False
+        holdings = current_holdings(_load_executions_raw())
         for s in config.ETF_POOL:
             old = float(prev.get(s, 0.0))
             new = float(w.get(s, 0.0))
             if abs(new - old) > 0.005:
                 action = "买入" if new > old else "卖出"
-                line = f"  {action} {config.ETF_POOL[s]}({s}): 目标权重 {old:.0%} -> {new:.0%}"
-                if args.capital:
-                    est = int(args.capital * abs(new - old) / last_close[s] // 100) * 100
-                    if est >= 100:
-                        line += f",约 {est} 股(按昨收 {last_close[s]:.3f} 估算,以明日开盘价为准)"
+                if action == "卖出":
+                    # 卖出按已成交流水的实际持仓;部分减仓按权重比例折算,无持仓则不生成计划
+                    held = holdings.get(s, 0)
+                    if new <= 0.005:
+                        est = held  # 清仓
                     else:
-                        line += f"(金额不足 1 手/100 股,可忽略)"
+                        est = int(held * (old - new) / old // 100) * 100 if old > 0 else 0
+                else:
+                    est = int((args.capital or 0) * abs(new - old) / last_close[s] // 100) * 100
+                line = f"  {action} {config.ETF_POOL[s]}({s}): 目标权重 {old:.0%} -> {new:.0%}"
+                if est >= 100:
+                    line += f",约 {est} 股(按昨收 {last_close[s]:.3f} 估算,以明日开盘价为准)"
+                    orders.append((action, s, est))
+                elif args.capital:
+                    line += f"(金额不足 1 手/100 股,可忽略)"
                 print(line)
                 changed = True
         if not changed:
@@ -110,6 +170,9 @@ def main():
     out = pd.concat([log, pd.DataFrame([row])], ignore_index=True).reindex(columns=cols)
     out.to_csv(LOG_PATH, index=False, encoding="utf-8-sig")
     print(f"\n信号已记录: {LOG_PATH}")
+
+    # 即使本次无可执行计划,也要清除已被新信号取代的旧计划行
+    write_planned(signal_date, orders, last_close)
 
 
 if __name__ == "__main__":

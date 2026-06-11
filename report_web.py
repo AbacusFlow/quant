@@ -150,6 +150,9 @@ def load_executions() -> pd.DataFrame | None:
     df = pd.read_csv(EXEC_PATH, encoding="utf-8-sig", dtype={"symbol": str})
     if df.empty:
         return None
+    if "status" not in df.columns:
+        df["status"] = ""
+    df["status"] = df["status"].fillna("").astype(str).str.strip()
     raw_action = df["action"].astype(str).str.strip()
     df["action"] = raw_action.str.lower().map(ACTION_ALIASES)
     df["symbol"] = df["symbol"].astype(str).str.strip()
@@ -244,14 +247,34 @@ def real_equity_series(execs: pd.DataFrame, closes: pd.DataFrame) -> tuple[pd.Se
     return equity, navs, net_deposit
 
 
+def exec_table(execs: pd.DataFrame) -> str:
+    """成交流水表(计划行灰显标注)"""
+    act_cn = {"buy": "买入", "sell": "卖出", "deposit": "入金", "withdraw": "出金"}
+    rows = ""
+    for _, r in execs.iloc[::-1].head(30).iterrows():
+        name = config.ETF_POOL.get(str(r.get("symbol", "")), "")
+        detail = (f"{name}({r['symbol']}) {r['price']} x {int(r['shares'])}股"
+                  if r["action"] in ("buy", "sell") else f"{float(r['amount']):,.0f} 元")
+        note = "" if pd.isna(r.get("note")) else str(r["note"])
+        planned = r["status"] == "计划"
+        status = "待执行(计划)" if planned else "已成交"
+        style = ' style="color:#999"' if planned else ""
+        rows += (f'<tr{style}><td>{r["date"].date()}</td><td>{act_cn[r["action"]]}</td>'
+                 f'<td>{html.escape(detail)}</td><td>{status}</td><td>{html.escape(note)}</td></tr>')
+    return (f'<table><tr><th>日期</th><th>操作</th><th>明细</th><th>状态</th><th>备注</th></tr>'
+            f'{rows}</table>')
+
+
 def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Series,
                       ew: pd.Series) -> str:
     """实盘板块 HTML;无记录给操作指引,解析失败给出错误而不中断整页生成。"""
-    guide = ('<p class="note">记录方法:在 GitHub 编辑 <code>output/executions.csv</code> 加一行,'
-             '列为 date,action,symbol,price,shares,amount,note。'
-             '入金如 <code>2026-06-12,入金,,,,10000,初始入金</code>;'
-             '买入如 <code>2026-06-12,买入,513100,1.234,4900,,</code>'
-             '(amount 选填=券商实际发生金额,含手续费更准)。没操作就不加行。</p>')
+    guide = ('<p class="note">记录方法:在 GitHub 编辑 <code>output/executions.csv</code>,'
+             '列为 date,action,symbol,price,shares,amount,note,status。'
+             '系统在有调仓信号时会自动写入 status=计划 的行(价格为昨收估算);'
+             '你实际成交后把该行价格/股数改成真实值、status 改为 已成交(或留空)即可。'
+             '计划行不参与净值计算,过期未确认的计划行会被下一次信号自动清除。'
+             '入金如 <code>2026-06-12,入金,,,,10000,初始入金,</code>'
+             '(amount 选填=券商实际发生金额,含手续费更准)。没操作就不动。</p>')
     try:
         execs = load_executions()
     except (ValueError, KeyError) as e:
@@ -260,8 +283,13 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
     if execs is None:
         return f'<h2>实盘 vs 模拟</h2><p class="note">尚无实盘成交记录。</p>{guide}'
 
+    confirmed = execs[execs["status"] != "计划"]
+    if confirmed.empty:
+        return (f'<h2>实盘 vs 模拟</h2><p class="note">尚无已成交记录(仅有待执行计划,'
+                f'见下表)。</p>{exec_table(execs)}{guide}')
+
     try:
-        real_eq, navs, net_deposit = real_equity_series(execs, closes)
+        real_eq, navs, net_deposit = real_equity_series(confirmed, closes)
     except ValueError as e:
         return (f'<h2>实盘 vs 模拟</h2><p style="color:#c00">实盘净值计算失败:'
                 f'{html.escape(str(e))}</p>{guide}')
@@ -298,19 +326,10 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
              f'<div class="card"><div class="card-label">累计净入金</div>'
              f'<div class="card-value">{net_deposit:,.0f} 元</div></div></div>')
 
-    act_cn = {"buy": "买入", "sell": "卖出", "deposit": "入金", "withdraw": "出金"}
-    rows = ""
-    for _, r in execs.iloc[::-1].head(30).iterrows():
-        name = config.ETF_POOL.get(str(r.get("symbol", "")), "")
-        detail = (f"{name}({r['symbol']}) {r['price']} x {int(r['shares'])}股"
-                  if r["action"] in ("buy", "sell") else f"{float(r['amount']):,.0f} 元")
-        note = "" if pd.isna(r.get("note")) else str(r["note"])
-        rows += (f'<tr><td>{r["date"].date()}</td><td>{act_cn[r["action"]]}</td>'
-                 f'<td>{html.escape(detail)}</td><td>{html.escape(note)}</td></tr>')
     return (f'<h2>实盘 vs 模拟</h2>{cards}'
             f'<img src="data:image/png;base64,{img}" alt="实盘净值">'
-            f'<h3>成交流水(最近 30 条)</h3>'
-            f'<table><tr><th>日期</th><th>操作</th><th>明细</th><th>备注</th></tr>{rows}</table>'
+            f'<h3>成交流水(最近 30 条,含待执行计划)</h3>'
+            f'{exec_table(execs)}'
             f'{guide}')
 
 
