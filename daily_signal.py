@@ -1,7 +1,7 @@
 """模拟盘每日信号:收盘后运行,输出最新目标持仓并记录到 output/signal_log.csv。
 
 用法(每个交易日收盘后):
-  python daily_signal.py [--mode single|ensemble]
+  python daily_signal.py [--mode single|ensemble] [--capital 10000]
 
 模式说明:
 - single(默认):整仓切换,小资金(约1万)下单笔金额大,摊薄 5 元最低佣金
@@ -14,6 +14,7 @@
 """
 import argparse
 import datetime as dt
+import math
 import os
 
 import pandas as pd
@@ -25,7 +26,8 @@ from run_rotation import build_weights, closes_table
 LOG_PATH = os.path.join(config.OUTPUT_DIR, "signal_log.csv")
 
 
-def latest_weights(end: str, mode: str) -> pd.Series:
+def latest_weights(end: str, mode: str) -> tuple[pd.Series, pd.Series]:
+    """返回 (最新目标权重, 最新收盘价),用于信号与下单股数估算"""
     prices = {}
     for symbol, name in config.ETF_POOL.items():
         prices[symbol] = data.get_etf_daily(symbol, config.ROTATION_START, end)
@@ -34,7 +36,7 @@ def latest_weights(end: str, mode: str) -> pd.Series:
         closes, mode=mode, lookback=config.ROTATION_LOOKBACK,
         buffer=config.ROTATION_BUFFER, dd_control=False,
     )
-    return weights.iloc[-1]
+    return weights.iloc[-1], closes.iloc[-1]
 
 
 def describe(w: pd.Series) -> str:
@@ -52,10 +54,14 @@ def main():
     parser = argparse.ArgumentParser(description="模拟盘每日信号")
     parser.add_argument("--mode", choices=("single", "ensemble"), default="single",
                         help="single=整仓切换(小资金默认), ensemble=多周期集成(本金≥10万)")
+    parser.add_argument("--capital", type=float, default=None,
+                        help="账户资金(元),提供后调仓指令附带预估下单股数(按昨收估算)")
     args = parser.parse_args()
+    if args.capital is not None and (not math.isfinite(args.capital) or args.capital <= 0):
+        parser.error("--capital 必须是正数")
 
     end = dt.date.today().isoformat()
-    w = latest_weights(end, args.mode)
+    w, last_close = latest_weights(end, args.mode)
     signal_date = w.name.date()
 
     print(f"\n========== 最新信号 (mode={args.mode}, 数据截至 {signal_date}) ==========")
@@ -83,7 +89,14 @@ def main():
             new = float(w.get(s, 0.0))
             if abs(new - old) > 0.005:
                 action = "买入" if new > old else "卖出"
-                print(f"  {action} {config.ETF_POOL[s]}({s}): 目标权重 {old:.0%} -> {new:.0%}")
+                line = f"  {action} {config.ETF_POOL[s]}({s}): 目标权重 {old:.0%} -> {new:.0%}"
+                if args.capital:
+                    est = int(args.capital * abs(new - old) / last_close[s] // 100) * 100
+                    if est >= 100:
+                        line += f",约 {est} 股(按昨收 {last_close[s]:.3f} 估算,以明日开盘价为准)"
+                    else:
+                        line += f"(金额不足 1 手/100 股,可忽略)"
+                print(line)
                 changed = True
         if not changed:
             print("  无需调仓")
