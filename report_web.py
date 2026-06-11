@@ -244,7 +244,8 @@ def real_equity_series(execs: pd.DataFrame, closes: pd.DataFrame) -> tuple[pd.Se
     return equity, navs, net_deposit
 
 
-def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Series) -> str:
+def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Series,
+                      ew: pd.Series) -> str:
     """实盘板块 HTML;无记录给操作指引,解析失败给出错误而不中断整页生成。"""
     guide = ('<p class="note">记录方法:在 GitHub 编辑 <code>output/executions.csv</code> 加一行,'
              '列为 date,action,symbol,price,shares,amount,note。'
@@ -275,6 +276,10 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
                 color="#ff9896", linestyle="--")
     if len(b) >= 2:
         ax.plot(b.index, b / b.iloc[0], label="沪深300(不操作)", linewidth=1.2, color="#7f7f7f")
+    e = ew.loc[start:].dropna()
+    if len(e) >= 2:
+        ax.plot(e.index, e / e.iloc[0], label="ETF池等权(不操作)", linewidth=1.2,
+                color="#1f77b4", alpha=0.8)
     ax.set_title(f"实盘净值对比(自 {start.date()},起始净值 1.0)")
     ax.legend(); ax.grid(alpha=0.3)
     img = fig_to_b64(fig)
@@ -425,7 +430,7 @@ img {{ max-width: 100%; background: #fff; border-radius: 6px; box-shadow: 0 1px 
 <h1>ETF 动量轮动 — 模拟盘报告</h1>
 <p class="note">更新于 {now}(数据截至 {signal_date})· mode={args.mode} · 本金 {args.capital:,.0f} 元 · 回测含佣金/滑点/整手约束 · A股红涨绿跌</p>
 
-{real_account_html(closes, equity, bench)}
+{real_account_html(closes, equity, bench, ew)}
 
 <div class="banner">
   <div class="big">最新信号:{html.escape(latest)}</div>
