@@ -50,7 +50,8 @@ def held_name(row: pd.Series) -> str:
     return " + ".join(f"{config.ETF_POOL[s]} {v:.0%}" for s, v in held.items())
 
 
-def holding_segments(weights: pd.DataFrame, equity: pd.Series, bench: pd.Series) -> list[dict]:
+def holding_segments(weights: pd.DataFrame, equity: pd.Series, bench: pd.Series,
+                     ew: pd.Series) -> list[dict]:
     """按持仓变化切分区间,统计每段的策略收益与同期基准收益。
 
     weights 为 T 日收盘信号,T+1 开盘执行,故标签后移 1 日与实际持仓对齐;
@@ -72,6 +73,7 @@ def holding_segments(weights: pd.DataFrame, equity: pd.Series, bench: pd.Series)
     for b0, e, label in segments:
         seg_eq = equity.loc[b0:e]
         seg_b = bench.loc[b0:e].dropna()
+        seg_w = ew.loc[b0:e].dropna()
         if len(seg_eq) < 2:
             continue
         rows.append({
@@ -79,6 +81,7 @@ def holding_segments(weights: pd.DataFrame, equity: pd.Series, bench: pd.Series)
             "days": len(seg_eq) - 1,
             "ret": seg_eq.iloc[-1] / seg_eq.iloc[0] - 1,
             "bench_ret": seg_b.iloc[-1] / seg_b.iloc[0] - 1 if len(seg_b) >= 2 else float("nan"),
+            "ew_ret": seg_w.iloc[-1] / seg_w.iloc[0] - 1 if len(seg_w) >= 2 else float("nan"),
         })
     return rows
 
@@ -331,6 +334,9 @@ def main():
     b = bench.dropna()
     m_bench = metrics_mod.equity_metrics(b)
     m_bench_oos = metrics_mod.equity_metrics(b.loc[config.OOS_SPLIT:])
+    w = ew.dropna()
+    m_ew = metrics_mod.equity_metrics(w)
+    m_ew_oos = metrics_mod.equity_metrics(w.loc[config.OOS_SPLIT:])
 
     # 图表
     img_full = build_equity_chart(equity, bench, ew,
@@ -341,18 +347,22 @@ def main():
                                 "近一年净值对比", log_scale=False)
 
     # 操作明细(近一年)
-    segs = holding_segments(weights, equity, bench)
+    segs = holding_segments(weights, equity, bench, ew)
     recent_segs = [r for r in segs if pd.Timestamp(r["end"]) >= one_year]
     seg_rows = "".join(
         f'<tr><td>{r["start"]} ~ {r["end"]}</td><td>{html.escape(r["label"])}</td>'
         f'<td>{r["days"]}</td>'
         f'<td class="{color_cls(r["ret"])}">{pct(r["ret"])}</td>'
         f'<td class="{color_cls(r["bench_ret"])}">{pct(r["bench_ret"])}</td>'
-        f'<td class="{color_cls(r["ret"] - r["bench_ret"])}">{pct(r["ret"] - r["bench_ret"])}</td></tr>'
+        f'<td class="{color_cls(r["ret"] - r["bench_ret"])}">{pct(r["ret"] - r["bench_ret"])}</td>'
+        f'<td class="{color_cls(r["ew_ret"])}">{pct(r["ew_ret"])}</td>'
+        f'<td class="{color_cls(r["ret"] - r["ew_ret"])}">{pct(r["ret"] - r["ew_ret"])}</td></tr>'
         for r in reversed(recent_segs)
     )
     seg_wins = sum(1 for r in segs if pd.notna(r["bench_ret"]) and r["ret"] > r["bench_ret"])
+    seg_wins_ew = sum(1 for r in segs if pd.notna(r["ew_ret"]) and r["ret"] > r["ew_ret"])
     seg_total = sum(1 for r in segs if pd.notna(r["bench_ret"]))
+    seg_total_ew = sum(1 for r in segs if pd.notna(r["ew_ret"]))
 
     # 最新信号
     latest = held_name(weights.iloc[-1])
@@ -370,7 +380,17 @@ def main():
 
     # 结论
     edge_oos = (m_oos["年化收益率"] - m_bench_oos["年化收益率"]) if m_oos else float("nan")
-    verdict = ("策略当前优于不操作" if pd.notna(edge_oos) and edge_oos > 0 else "策略当前未跑赢不操作")
+    edge_ew_oos = (m_oos["年化收益率"] - m_ew_oos["年化收益率"]) if m_oos else float("nan")
+    beat_300 = pd.notna(edge_oos) and edge_oos > 0
+    beat_ew = pd.notna(edge_ew_oos) and edge_ew_oos > 0
+    if beat_300 and beat_ew:
+        verdict = "策略当前优于不操作(同时跑赢沪深300与ETF池等权)"
+    elif beat_300:
+        verdict = "策略跑赢沪深300、但未跑赢ETF池等权"
+    elif beat_ew:
+        verdict = "策略跑赢ETF池等权、但未跑赢沪深300"
+    else:
+        verdict = "策略当前未跑赢不操作"
 
     now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     html_doc = f"""<!DOCTYPE html>
@@ -412,7 +432,9 @@ img {{ max-width: 100%; background: #fff; border-radius: 6px; box-shadow: 0 1px 
   <div style="margin-top:6px">{verdict}:样本外({config.OOS_SPLIT} 至今)策略年化
   <b class="{color_cls(m_oos['年化收益率']) if m_oos else ''}">{pct(m_oos['年化收益率'], signed=False) if m_oos else '-'}</b>
   vs 沪深300买入持有 <b>{pct(m_bench_oos['年化收益率'], signed=False)}</b>
-  (超额 <b class="{color_cls(edge_oos)}">{pct(edge_oos)}</b>/年)</div>
+  vs ETF池等权持有 <b>{pct(m_ew_oos['年化收益率'], signed=False)}</b>
+  (超额沪深300 <b class="{color_cls(edge_oos)}">{pct(edge_oos)}</b>/年,
+  超额等权 <b class="{color_cls(edge_ew_oos)}">{pct(edge_ew_oos)}</b>/年)</div>
 </div>
 
 <h2>净值对比:操作 vs 不操作</h2>
@@ -420,9 +442,9 @@ img {{ max-width: 100%; background: #fff; border-radius: 6px; box-shadow: 0 1px 
 <img src="data:image/png;base64,{img_1y}" alt="近一年净值">
 
 <h2>策略操作明细(近一年,每次切换为一次操作)</h2>
-<p class="note">每段持仓的区间收益与同期沪深300对比。全历史 {seg_total} 段持仓中,跑赢同期沪深300的有 {seg_wins} 段({seg_wins / seg_total:.0%})。</p>
+<p class="note">每段持仓的区间收益与同期基准对比。全历史跑赢同期沪深300的有 {seg_wins}/{seg_total} 段({seg_wins / seg_total:.0%}),跑赢同期ETF池等权的有 {seg_wins_ew}/{seg_total_ew} 段({seg_wins_ew / seg_total_ew:.0%})。</p>
 <table>
-<tr><th>持仓区间</th><th>持有标的</th><th>天数</th><th>本段收益</th><th>同期沪深300</th><th>超额</th></tr>
+<tr><th>持仓区间</th><th>持有标的</th><th>天数</th><th>本段收益</th><th>同期沪深300</th><th>超额(vs沪深300)</th><th>同期等权</th><th>超额(vs等权)</th></tr>
 {seg_rows}
 </table>
 
@@ -430,6 +452,7 @@ img {{ max-width: 100%; background: #fff; border-radius: 6px; box-shadow: 0 1px 
 {metric_cards(f"策略 · 全区间({equity.index[0].date()} 起)", m_all)}
 {metric_cards(f"策略 · 样本外({config.OOS_SPLIT} 起,更接近真实预期)", m_oos) if m_oos else ""}
 {metric_cards("沪深300 买入持有 · 全区间(不操作的对照)", m_bench)}
+{metric_cards("ETF池等权 买入持有 · 全区间(持有全部标的不轮动的对照)", m_ew)}
 
 <h2>模拟盘信号日志(最近 15 条)</h2>
 <table>
