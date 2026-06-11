@@ -69,8 +69,57 @@ def get_stock_daily(symbol: str, start: str, end: str) -> pd.DataFrame:
     return df
 
 
+def _exchange_prefix(symbol: str) -> str:
+    return "sh" if symbol.startswith(("5", "6")) else "sz"
+
+
+def _fetch_etf_tencent(symbol: str, start: str, end: str) -> pd.DataFrame:
+    """腾讯前复权日线(无需 akshare,海外 IP 下通常可用)。
+
+    接口单次最多返回区间内最近 640 根 K 线,按结束日期向前翻页拼接。
+    """
+    import datetime as dt
+
+    import requests
+
+    code = f"{_exchange_prefix(symbol)}{symbol}"
+    all_rows: list[list] = []
+    cur_end = end
+    while True:
+        url = (
+            "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+            f"?param={code},day,{start},{cur_end},640,qfq"
+        )
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()["data"]
+        if not isinstance(data, dict) or code not in data:
+            raise RuntimeError(f"腾讯接口未返回 ETF {symbol} 的数据")
+        # 仅接受前复权数据,避免不复权数据污染 qfq 缓存
+        rows = data[code].get("qfqday")
+        if not rows:
+            break
+        all_rows = rows + all_rows
+        earliest = rows[0][0]
+        if earliest <= start or len(rows) < 640:
+            break
+        cur_end = (dt.date.fromisoformat(earliest) - dt.timedelta(days=1)).isoformat()
+    if not all_rows:
+        raise RuntimeError(f"腾讯接口未返回 ETF {symbol} 的数据")
+    # 行格式: [date, open, close, high, low, volume, ...]
+    df = pd.DataFrame([r[:6] for r in all_rows],
+                      columns=["date", "open", "close", "high", "low", "volume"])
+    df = df.drop_duplicates(subset="date", keep="first")
+    df[["open", "close", "high", "low", "volume"]] = \
+        df[["open", "close", "high", "low", "volume"]].astype(float)
+    return df[["date", "open", "high", "low", "close", "volume"]]
+
+
 def get_etf_daily(symbol: str, start: str, end: str) -> pd.DataFrame:
-    """场内 ETF 日线前复权数据,列: open/high/low/close/volume,索引为日期"""
+    """场内 ETF 日线前复权数据,列: open/high/low/close/volume,索引为日期。
+
+    数据源优先级:东财(qfq)→ 腾讯(qfq)→ 新浪(不复权,独立缓存键)。
+    """
     path = _cache_path(f"etf_{symbol}", start, end)
     cached = _load_cache(path)
     if cached is not None:
@@ -86,6 +135,8 @@ def get_etf_daily(symbol: str, start: str, end: str) -> pd.DataFrame:
             end_date=end.replace("-", ""),
             adjust="qfq",
         ))
+        if raw is None or raw.empty:
+            raise RuntimeError(f"东财未返回 ETF {symbol} 的数据")
         df = raw.rename(
             columns={
                 "日期": "date",
@@ -97,14 +148,17 @@ def get_etf_daily(symbol: str, start: str, end: str) -> pd.DataFrame:
             }
         )[["date", "open", "high", "low", "close", "volume"]]
     except Exception:
-        # 东财接口失败时回退到新浪(注意:新浪为不复权数据,用独立缓存键避免污染 qfq 缓存)
-        path = _cache_path(f"etf_{symbol}_sina", start, end)
-        cached = _load_cache(path)
-        if cached is not None:
-            return cached
-        prefix = "sh" if symbol.startswith(("5", "6")) else "sz"
-        raw = _retry(lambda: ak.fund_etf_hist_sina(symbol=f"{prefix}{symbol}"))
-        df = raw[["date", "open", "high", "low", "close", "volume"]].copy()
+        try:
+            # 回退1:腾讯,同为前复权,可共用 qfq 缓存键
+            df = _retry(lambda: _fetch_etf_tencent(symbol, start, end))
+        except Exception:
+            # 回退2:新浪为不复权数据,用独立缓存键避免污染 qfq 缓存
+            path = _cache_path(f"etf_{symbol}_sina", start, end)
+            cached = _load_cache(path)
+            if cached is not None:
+                return cached
+            raw = _retry(lambda: ak.fund_etf_hist_sina(symbol=f"{_exchange_prefix(symbol)}{symbol}"))
+            df = raw[["date", "open", "high", "low", "close", "volume"]].copy()
 
     if df is None or df.empty:
         raise RuntimeError(f"akshare 未返回 ETF {symbol} 的数据,请检查代码或接口版本")

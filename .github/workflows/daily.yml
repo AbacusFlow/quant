@@ -1,0 +1,97 @@
+# 每个交易日收盘后:跑信号 → 微信推送 → 提交信号日志 → 生成并部署 Pages 报告。
+# 两个触发时间互为兜底(同一信号日期+模式幂等,不会重复记录/推送)。
+# 节假日无新数据时信号日期不变,自动跳过推送。
+name: daily-signal
+
+on:
+  schedule:
+    - cron: "38 8 * * 1-5"   # 北京时间 16:38(UTC+8)
+    - cron: "38 9 * * 1-5"   # 北京时间 17:38 兜底
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: daily-signal
+  cancel-in-progress: false
+
+jobs:
+  signal-and-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安装依赖与中文字体
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-cjk
+          pip install -q -r requirements.txt
+
+      - name: 运行每日信号
+        id: signal
+        env:
+          SIGNAL_MODE: ${{ vars.SIGNAL_MODE || 'single' }}
+          SIGNAL_CAPITAL: ${{ vars.SIGNAL_CAPITAL || '10000' }}
+        run: |
+          set -o pipefail
+          python daily_signal.py --mode "$SIGNAL_MODE" --capital "$SIGNAL_CAPITAL" | tee signal_output.txt
+
+      # 先持久化日志再推送:提交失败则整个 job 失败且不发推送,
+      # 重跑时 daily_signal 幂等(同信号日期+模式不重复记录),不会重复推送。
+      - name: 提交信号日志
+        id: commit_log
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add output/signal_log.csv
+          if git diff --cached --quiet; then
+            echo "日志无变化"
+            echo "new_signal=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "信号日志 $(date -u -d '+8 hours' '+%F')"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo "new_signal=true" >> "$GITHUB_OUTPUT"
+
+      - name: 微信推送(Server酱)
+        if: steps.commit_log.outputs.new_signal == 'true'
+        env:
+          SENDKEY: ${{ secrets.SENDKEY }}
+        run: |
+          if [ -z "$SENDKEY" ]; then echo "未配置 SENDKEY,跳过推送"; exit 0; fi
+          SIGNAL=$(grep "目标持仓" signal_output.txt | head -1)
+          if grep -qE "买入|卖出" signal_output.txt; then
+            TITLE="[量化] 明早需调仓!"
+            BODY="$SIGNAL
+          调仓指令(明日开盘执行):
+          $(grep -E '买入|卖出' signal_output.txt)"
+          else
+            TITLE="[量化] 今日无操作"
+            BODY="$SIGNAL"
+          fi
+          RESP=$(curl -sS --fail --max-time 20 "https://sctapi.ftqq.com/${SENDKEY}.send" \
+            --data-urlencode "title=$TITLE" --data-urlencode "desp=$BODY")
+          echo "$RESP" | grep -q '"code" *: *0' || { echo "推送失败: $RESP"; exit 1; }
+          echo "推送成功: $TITLE"
+
+      - name: 生成网页报告
+        env:
+          SIGNAL_MODE: ${{ vars.SIGNAL_MODE || 'single' }}
+          SIGNAL_CAPITAL: ${{ vars.SIGNAL_CAPITAL || '10000' }}
+        run: python report_web.py --mode "$SIGNAL_MODE" --capital "$SIGNAL_CAPITAL"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - uses: actions/deploy-pages@v4

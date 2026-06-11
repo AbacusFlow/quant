@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 data/
-output/
+output/*
+!output/signal_log.csv
+site/
 .DS_Store
 .env
