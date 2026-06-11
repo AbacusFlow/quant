@@ -15,9 +15,10 @@ MA_LONG = 20
 # 初始资金
 INITIAL_CAPITAL = 1_000_000.0
 
-# 交易费用(A股)
-COMMISSION_RATE = 0.00025   # 佣金 万2.5,双边
-COMMISSION_MIN = 5.0        # 最低佣金 5 元
+# 交易费用(A股,券商 VIP 费率:ETF 万0.5、股票万1,均最低 5 元起收)
+STOCK_COMMISSION_RATE = 0.0001    # 股票佣金 万1,双边(backtest.py 单标的引擎)
+ETF_COMMISSION_RATE = 0.00005     # ETF 佣金 万0.5,双边(portfolio.py 组合引擎)
+COMMISSION_MIN = 5.0              # 最低佣金 5 元
 STAMP_TAX_RATE = 0.0005     # 印花税 万5,仅卖出
 
 # 滑点(单边,按成交价比例;流动性好的宽基ETF约万5)

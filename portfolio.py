@@ -2,7 +2,7 @@
 
 - 信号:目标权重在 T 日收盘后产生,T+1 日开盘执行
 - 成交:开盘价 + 滑点(买加卖减),100 股整手
-- 费用:佣金(万2.5,最低5元);印花税仅对股票卖出收取(ETF 免)
+- 费用:佣金(ETF 万0.5,最低5元);印花税仅对股票卖出收取(ETF 免)
 - 先卖后买,买入按目标权重比例分配可用资金
 """
 from dataclasses import dataclass, field
@@ -49,7 +49,7 @@ class PortfolioResult:
 
 
 def _commission(amount: float) -> float:
-    return max(amount * config.COMMISSION_RATE, config.COMMISSION_MIN)
+    return max(amount * config.ETF_COMMISSION_RATE, config.COMMISSION_MIN)
 
 
 def _sell_fee(amount: float, stamp_tax: bool) -> float:
@@ -129,7 +129,7 @@ def run_portfolio_backtest(
             price = opens[s] * (1 + slippage)
             budget = cash_snapshot * (diff * price / total_buy_value)
             # 佣金计入各自预算内,保证分配结果与成交顺序无关
-            buy_shares = min(diff, int(budget / (price * (1 + config.COMMISSION_RATE)) // 100) * 100)
+            buy_shares = min(diff, int(budget / (price * (1 + config.ETF_COMMISSION_RATE)) // 100) * 100)
             while buy_shares > 0:
                 amount = buy_shares * price
                 fee = _commission(amount)

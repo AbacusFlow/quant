@@ -42,7 +42,7 @@ def test_lot_size_and_fees():
     # 10万本金,10元/股 -> 最多9900股(留出佣金)
     assert t.shares in (9900, 10000)
     amount = t.shares * 10.0
-    assert t.fee == max(amount * config.COMMISSION_RATE, config.COMMISSION_MIN)
+    assert t.fee == max(amount * config.ETF_COMMISSION_RATE, config.COMMISSION_MIN)
     assert t.amount + t.fee <= 100_000
 
 

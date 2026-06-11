@@ -18,12 +18,17 @@ docker build -f .docker/Dockerfile -t quant .
 # ETF momentum rotation (primary): full / in-sample / out-of-sample metrics
 docker run --rm -v "$PWD":/work quant python run_rotation.py --end 2026-06-09
 docker run --rm -v "$PWD":/work quant python run_rotation.py --sensitivity   # lookback scan
+docker run --rm -v "$PWD":/work quant python run_rotation.py --compare       # single vs ensemble vs ensemble+dd
+
+# Paper-trading daily signal (run after market close; appends to output/signal_log.csv)
+docker run --rm -v "$PWD":/work quant python daily_signal.py
 
 # Single-asset dual-MA demo
 docker run --rm -v "$PWD":/work quant python main.py --symbol 600519
 
-# Unit tests (portfolio engine)
-docker run --rm -v "$PWD":/work quant python test_portfolio.py
+# Unit tests
+docker run --rm -v "$PWD":/work quant python test_portfolio.py   # portfolio engine
+docker run --rm -v "$PWD":/work quant python test_strategy.py    # rotation/ensemble/drawdown control
 ```
 
 No linters configured.
@@ -35,12 +40,14 @@ data.py → strategy.py → backtest.py (single-asset)  → metrics.py / report.
                       ↘ portfolio.py (multi-asset)  ↗        (run_rotation.py)
 ```
 
-- **portfolio.py** — multi-asset portfolio engine: target-weight DataFrame in, T+1 open execution with slippage, proportional cash budgeting across simultaneous buys (order-independent), 100-share lots, ETF trades exempt from stamp tax (`stamp_tax=False`). `align_prices()` defines the common trading calendar — signals and execution must use the same calendar.
-- **run_rotation.py** — rotation CLI: loads the `config.ETF_POOL`, reports full / in-sample / out-of-sample (`config.OOS_SPLIT`) metrics, `--sensitivity` runs a lookback parameter scan. Prints the latest target holding for live tracking.
+- **portfolio.py** — multi-asset portfolio engine: target-weight DataFrame in, T+1 open execution with slippage, proportional cash budgeting across simultaneous buys (order-independent), 100-share lots, ETF trades exempt from stamp tax (`stamp_tax=False`), rebalance band (`config.REBALANCE_BAND`: skip trades when target vs. current deviates by <2% of total assets). `align_prices()` defines the common trading calendar — signals and execution must use the same calendar.
+- **run_rotation.py** — rotation CLI: loads the `config.ETF_POOL`, reports full / in-sample / out-of-sample (`config.OOS_SPLIT`) metrics. Modes: `--mode ensemble` (default, multi-lookback average per `config.ENSEMBLE_LOOKBACKS`) or `--mode single`; `--dd` adds drawdown control (off by default — backtest showed ~3% annualized cost for ~2pp drawdown improvement); `--sensitivity` scans lookbacks; `--compare` tabulates the three variants. `build_weights()`/`closes_table()` are reused by daily_signal.py — keep their signatures stable.
+- **daily_signal.py** — paper-trading signal tracker: recomputes the latest target weights (`--mode single` default for small capital, `ensemble` once capital ≥100k; no dd control), diffs against the last logged signal to print rebalance instructions (execute next-day open), appends to `output/signal_log.csv` with a `mode` column. Idempotent per signal date.
 - **test_portfolio.py** — unit tests for the portfolio engine (T+1, lots, fees, slippage, stamp tax, cash conservation) using hand-built price data. Run them after touching portfolio.py.
+- **test_strategy.py** — unit tests for rotation/ensemble/drawdown control, including a no-look-ahead test (truncating future data must not change historical control coefficients). Run them after touching strategy.py.
 
 - **data.py** — fetches stock/ETF daily bars (前复权/qfq) and CSI 300 benchmark via akshare with retry; caches as CSV in `data/` keyed by `{name}_{start}_{end}.csv` (delete to force refresh; empty caches are treated as misses). Eastmoney failures fall back to Sina — Sina ETF data is **unadjusted** and cached under a separate `_sina` key to avoid contaminating qfq caches.
-- **strategy.py** — single-asset strategies take an OHLCV DataFrame and return a 0/1 position Series; `etf_momentum_rotation()` takes a closes table and returns a target-weight DataFrame (top-1 momentum, absolute-momentum filter to cash, switch buffer). Signals are computed on close; execution is next-day open (T+1). Use `pct_change(..., fill_method=None)` to avoid forward-filling stale prices.
+- **strategy.py** — single-asset strategies take an OHLCV DataFrame and return a 0/1 position Series; `etf_momentum_rotation()` takes a closes table and returns a target-weight DataFrame (top-1 momentum, absolute-momentum filter to cash, switch buffer); `etf_momentum_ensemble()` averages rotation weights across `lookbacks` (weights become fractional, row sum ≤ 1); `apply_drawdown_control()` scales weights by `DD_SCALE` when the strategy's virtual NAV drops below its `DD_MA_WINDOW`-day MA — must stay causal (T-day coefficient uses only data ≤ T). Signals are computed on close; execution is next-day open (T+1). Use `pct_change(..., fill_method=None)` to avoid forward-filling stale prices.
 - **backtest.py** — `run_backtest()` simulates day by day: shifts the position series by 1 day (T+1), trades at the open price in 100-share lots, and models A-share fees (commission with 5 CNY minimum, stamp tax on sells only). Returns `BacktestResult` with daily equity and a `Trade` list.
 - **metrics.py** — total/annualized return, Sharpe (252 trading days), max drawdown, win rate per completed buy→sell round.
 - **report.py** — prints metrics, saves `output/equity_curve.png` (strategy vs. normalized benchmark) and `output/trades.csv`. Uses matplotlib `Agg` backend with CJK fonts configured for Chinese labels.
@@ -48,6 +55,6 @@ data.py → strategy.py → backtest.py (single-asset)  → metrics.py / report.
 
 ## Key Conventions
 
-- All trading logic assumes A-share rules: T+1 execution, 100-share lot sizes, stamp tax on sells.
-- Position series must contain only 0/1 (no partial positions or shorting).
+- All trading logic assumes A-share rules: T+1 execution, 100-share lot sizes, stamp tax on sells (ETF exempt). Commission is broker VIP rate (ETF 万0.5) with a 5 CNY minimum — the minimum dominates costs at small capital, so `single` mode (full-position switches) is preferred below ~100k capital and `ensemble` above (see `run_rotation.py --capital`).
+- Single-asset position series must contain only 0/1 (no partial positions or shorting). Multi-asset target weights may be fractional but each row must sum to ≤ 1 (remainder is cash); no shorting or leverage.
 - akshare is imported lazily inside data-fetching functions, so cached runs work without network access.

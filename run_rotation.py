@@ -65,10 +65,11 @@ def build_weights(closes: pd.DataFrame, mode: str, lookback: int, buffer: float,
 
 
 def run_once(prices: dict[str, pd.DataFrame], lookback: int, buffer: float,
-             mode: str = "single", dd_control: bool = False) -> tuple:
+             mode: str = "single", dd_control: bool = False,
+             capital: float = config.INITIAL_CAPITAL) -> tuple:
     closes = closes_table(prices)
     weights = build_weights(closes, mode, lookback, buffer, dd_control)
-    result = run_portfolio_backtest(prices, weights, stamp_tax=False)
+    result = run_portfolio_backtest(prices, weights, initial_capital=capital, stamp_tax=False)
     return result, weights
 
 
@@ -78,6 +79,8 @@ def main():
     parser.add_argument("--end", default=dt.date.today().isoformat())
     parser.add_argument("--lookback", type=int, default=config.ROTATION_LOOKBACK)
     parser.add_argument("--buffer", type=float, default=config.ROTATION_BUFFER)
+    parser.add_argument("--capital", type=float, default=config.INITIAL_CAPITAL,
+                        help="初始资金(元),小资金下最低佣金与整手约束影响显著")
     parser.add_argument("--sensitivity", action="store_true", help="lookback 参数敏感性扫描")
     parser.add_argument("--mode", choices=("single", "ensemble"), default="ensemble",
                         help="single=单一lookback, ensemble=多周期集成(默认)")
@@ -97,7 +100,8 @@ def main():
         ]
         rows = []
         for label, mode, dd in variants:
-            result, _ = run_once(prices, args.lookback, args.buffer, mode=mode, dd_control=dd)
+            result, _ = run_once(prices, args.lookback, args.buffer, mode=mode, dd_control=dd,
+                                 capital=args.capital)
             m = metrics_mod.equity_metrics(result.equity)
             oos = result.equity.loc[config.OOS_SPLIT:]
             m_oos = metrics_mod.equity_metrics(oos) if len(oos) >= 2 else None
@@ -114,10 +118,11 @@ def main():
         return
 
     if args.sensitivity:
-        print(f"\n========== 参数敏感性: lookback 扫描 ==========")
+        # 扫描单一 lookback 的敏感性,固定 single 模式(ensemble 的 lookback 组合是固定的,扫描无意义)
+        print(f"\n========== 参数敏感性: lookback 扫描 (mode=single) ==========")
         rows = []
         for lb in (10, 15, 20, 25, 30, 40, 60):
-            result, _ = run_once(prices, lb, args.buffer)
+            result, _ = run_once(prices, lb, args.buffer, mode="single", capital=args.capital)
             m = metrics_mod.equity_metrics(result.equity)
             oos = result.equity.loc[config.OOS_SPLIT:]
             m_oos = metrics_mod.equity_metrics(oos) if len(oos) >= 2 else None
@@ -134,10 +139,11 @@ def main():
         return
 
     dd_control = args.dd
-    result, weights = run_once(prices, args.lookback, args.buffer, mode=args.mode, dd_control=dd_control)
+    result, weights = run_once(prices, args.lookback, args.buffer, mode=args.mode, dd_control=dd_control,
+                               capital=args.capital)
     equity = result.equity
 
-    desc = f"mode={args.mode}, 回撤控制={'开' if dd_control else '关'}, buffer={args.buffer}"
+    desc = f"mode={args.mode}, 回撤控制={'开' if dd_control else '关'}, buffer={args.buffer}, 本金={args.capital:,.0f}"
     if args.mode == "single":
         desc += f", lookback={args.lookback}"
     print(f"\n========== ETF 动量轮动 ({desc}) ==========")

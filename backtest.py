@@ -40,11 +40,11 @@ class BacktestResult:
 
 
 def _buy_fee(amount: float) -> float:
-    return max(amount * config.COMMISSION_RATE, config.COMMISSION_MIN)
+    return max(amount * config.STOCK_COMMISSION_RATE, config.COMMISSION_MIN)
 
 
 def _sell_fee(amount: float) -> float:
-    commission = max(amount * config.COMMISSION_RATE, config.COMMISSION_MIN)
+    commission = max(amount * config.STOCK_COMMISSION_RATE, config.COMMISSION_MIN)
     return commission + amount * config.STAMP_TAX_RATE
 
 
@@ -66,7 +66,7 @@ def run_backtest(df: pd.DataFrame, position: pd.Series,
 
         if tgt == 1 and shares == 0:
             # 按开盘价买入,A股 100 股一手
-            est_shares = int(cash / (open_price * (1 + config.COMMISSION_RATE)) // 100) * 100
+            est_shares = int(cash / (open_price * (1 + config.STOCK_COMMISSION_RATE)) // 100) * 100
             while est_shares > 0:
                 amount = est_shares * open_price
                 fee = _buy_fee(amount)
