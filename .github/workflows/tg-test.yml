@@ -1,0 +1,19 @@
+# 临时:验证 TG_BOT_TOKEN/TG_CHAT_ID 配置,测完即删
+name: tg-test
+on: workflow_dispatch
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 发送测试消息
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then echo "secrets 未配置"; exit 1; fi
+          RESP=$(curl -sS --fail --max-time 20 "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "text=[量化] Telegram 推送测试成功!之后每个交易日早上会收到信号推送。")
+          echo "$RESP" | grep -q '"ok" *: *true' || { echo "推送失败: $RESP"; exit 1; }
+          echo "推送成功"
