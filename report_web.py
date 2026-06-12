@@ -171,10 +171,14 @@ def load_executions() -> pd.DataFrame | None:
             if pd.isna(r["amount"]):
                 raise ValueError(f"第 {rowno} 行 {raw_action[i]} 必须填正数 amount(金额)")
         else:
-            if r["symbol"] not in config.ETF_POOL:
-                raise ValueError(f"第 {rowno} 行 symbol 不在 ETF 池: {r['symbol']}")
-            if pd.isna(r["price"]) or float(r["price"]) <= 0 or pd.isna(r["shares"]) or float(r["shares"]) <= 0:
-                raise ValueError(f"第 {rowno} 行买卖必须填正数 price 和 shares")
+            # 允许池外标的(如误买错代码后的持有/清仓),只校验代码格式
+            if not (r["symbol"].isdigit() and len(r["symbol"]) == 6):
+                raise ValueError(f"第 {rowno} 行 symbol 无效(应为6位代码): {r['symbol']}")
+            if pd.isna(r["shares"]) or float(r["shares"]) <= 0:
+                raise ValueError(f"第 {rowno} 行买卖必须填正数 shares")
+            # 计划行允许 price 留空(池外标的系统无估算价);已成交必须有真实价格
+            if r["status"] != "计划" and (pd.isna(r["price"]) or float(r["price"]) <= 0):
+                raise ValueError(f"第 {rowno} 行买卖必须填正数 price")
             if float(r["shares"]) != int(r["shares"]):
                 raise ValueError(f"第 {rowno} 行 shares 必须为整数股")
     df["date"] = parsed_date
@@ -197,7 +201,7 @@ def real_equity_series(execs: pd.DataFrame, closes: pd.DataFrame) -> tuple[pd.Se
     net_deposit = 0.0
     units = 0.0  # 份额
     nav = 1.0
-    pos: dict[str, int] = {s: 0 for s in config.ETF_POOL}
+    pos: dict[str, int] = {}  # 含池外标的(误买),按需建键
     first = execs["date"].min()
     days = closes.index[closes.index >= first.normalize()]
     if days.empty:
@@ -224,18 +228,18 @@ def real_equity_series(execs: pd.DataFrame, closes: pd.DataFrame) -> tuple[pd.Se
                 if r["action"] == "buy":
                     cost = float(r["amount"]) if pd.notna(r["amount"]) else gross + fee_default
                     cash -= cost
-                    pos[r["symbol"]] += int(r["shares"])
+                    pos[r["symbol"]] = pos.get(r["symbol"], 0) + int(r["shares"])
                     if cash < -0.01:
                         raise ValueError(f"{r['date'].date()} 买入 {r['symbol']} 后现金为负,"
                                          "请检查流水(是否漏记入金或金额多写)")
                 else:
                     proceeds = float(r["amount"]) if pd.notna(r["amount"]) else gross - fee_default
                     cash += proceeds
-                    pos[r["symbol"]] -= int(r["shares"])
+                    pos[r["symbol"]] = pos.get(r["symbol"], 0) - int(r["shares"])
                     if pos[r["symbol"]] < 0:
                         raise ValueError(f"{r['date'].date()} 卖出 {r['symbol']} 后持仓为负,请检查流水")
             applied[i] = True
-        eq = cash + sum(pos[s] * closes.at[day, s] for s in config.ETF_POOL)
+        eq = cash + sum(n * float(closes.at[day, s]) for s, n in pos.items() if n)
         equity.at[day] = eq
         if units > 1e-9:
             nav = (eq - flow_today) / units  # 当日收益归属于既有份额
@@ -252,8 +256,9 @@ def exec_table(execs: pd.DataFrame) -> str:
     act_cn = {"buy": "买入", "sell": "卖出", "deposit": "入金", "withdraw": "出金"}
     rows = ""
     for _, r in execs.iloc[::-1].head(30).iterrows():
-        name = config.ETF_POOL.get(str(r.get("symbol", "")), "")
-        detail = (f"{name}({r['symbol']}) {r['price']} x {int(r['shares'])}股"
+        name = config.ETF_POOL.get(str(r.get("symbol", "")), "(池外)")
+        price_s = "市价" if pd.isna(r.get("price")) else r["price"]
+        detail = (f"{r['symbol']} {name} {price_s} x {int(r['shares'])}股"
                   if r["action"] in ("buy", "sell") else f"{float(r['amount']):,.0f} 元")
         note = "" if pd.isna(r.get("note")) else str(r["note"])
         planned = r["status"] == "计划"
@@ -287,6 +292,20 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
     if confirmed.empty:
         return (f'<h2>实盘 vs 模拟</h2><p class="note">尚无已成交记录(仅有待执行计划,'
                 f'见下表)。</p>{exec_table(execs)}{guide}')
+
+    # 池外标的(误买)的收盘价不在轮动 closes 表里,按需补列用于净值计算
+    extra = sorted(set(confirmed.loc[confirmed["action"].isin(("buy", "sell")), "symbol"])
+                   - set(closes.columns))
+    if extra:
+        closes = closes.copy()
+        for s in extra:
+            try:
+                px = data.get_etf_daily(s, config.ROTATION_START,
+                                        str(closes.index[-1].date()))["close"]
+            except Exception as e:
+                return (f'<h2>实盘 vs 模拟</h2><p style="color:#c00">池外标的 {s} 行情获取失败:'
+                        f'{html.escape(str(e))}</p>{exec_table(execs)}{guide}')
+            closes[s] = px.reindex(closes.index).ffill()
 
     try:
         real_eq, navs, net_deposit = real_equity_series(confirmed, closes)

@@ -56,7 +56,7 @@ def describe(w: pd.Series) -> str:
     held = w[w > 0.005]
     if held.empty:
         return "空仓持现金"
-    parts = [f"{config.ETF_POOL[s]}({s}) {v:.0%}" for s, v in held.items()]
+    parts = [f"{s} {config.ETF_POOL[s]} {v:.0%}" for s, v in held.items()]
     cash = 1 - held.sum()
     if cash > 0.005:
         parts.append(f"现金 {cash:.0%}")
@@ -113,8 +113,9 @@ def write_planned(signal_date, orders: list[tuple[str, str, int]], last_close: p
         return  # 无新计划也无旧计划,不动文件
     rows = []
     for action, symbol, shares in orders:
+        px = last_close.get(symbol)  # 池外标的(误买清仓)无系统价格,留空
         rows.append({"date": str(exec_date), "action": action, "symbol": symbol,
-                     "price": round(float(last_close[symbol]), 3), "shares": shares,
+                     "price": round(float(px), 3) if px is not None else "", "shares": shares,
                      "amount": "", "note": f"按 {signal_date} 信号,价格为信号日收盘估算,成交后请改实际价格/股数(日期有出入也请修正)并将 status 改为 已成交",
                      "status": "计划"})
     out = pd.concat([df, pd.DataFrame(rows, columns=EXEC_COLS)], ignore_index=True)
@@ -160,10 +161,10 @@ def main():
 
     prev = log.iloc[-1] if not log.empty else None
 
-    # 幂等:同一信号日期 + 同一模式在日志任意位置已存在则不重复记录
-    if not log.empty and ((log["signal_date"] == str(signal_date)) & (log["mode"] == args.mode)).any():
-        print("(同一信号日期、同一模式已记录,不重复记录)")
-        return
+    # 幂等:同一信号日期 + 同一模式在日志任意位置已存在则不重复记录信号,
+    # 但计划生成仍要跑(流水可能在两次运行之间被修正,如误买后改持仓)
+    already = (not log.empty
+               and ((log["signal_date"] == str(signal_date)) & (log["mode"] == args.mode)).any())
 
     # 执行日 = 信号日的下一交易日;早上开盘前运行时即今天
     exec_date = next_trade_date(signal_date)
@@ -188,7 +189,7 @@ def main():
                         est = int(held * (old - new) / old // 100) * 100 if old > 0 else 0
                 else:
                     est = int((args.capital or 0) * abs(new - old) / last_close[s] // 100) * 100
-                line = f"  {action} {config.ETF_POOL[s]}({s}): 目标权重 {old:.0%} -> {new:.0%}"
+                line = f"  {action} {s}({config.ETF_POOL[s]}): 目标权重 {old:.0%} -> {new:.0%}"
                 if est >= 100:
                     line += f",约 {est} 股(按昨收 {last_close[s]:.3f} 估算,以{day_word}开盘价为准)"
                     orders.append((action, s, est))
@@ -210,25 +211,34 @@ def main():
                 if est >= 100:
                     orders.append(("买入", s, est))
                     if prior is None or prior[2] != est:
-                        print(f"  买入 {config.ETF_POOL[s]}({s}): 建仓至目标权重 {tgt:.0%},"
+                        print(f"  买入 {s}({config.ETF_POOL[s]}): 建仓至目标权重 {tgt:.0%},"
                               f"约 {est} 股(按昨收 {last_close[s]:.3f} 估算,以{day_word}开盘价为准)")
                         changed = True
             elif tgt <= 0.005 and held > 0 and not any(o[0] == "卖出" and o[1] == s for o in orders):
                 orders.append(("卖出", s, held))
-                print(f"  卖出 {config.ETF_POOL[s]}({s}): 目标权重 0,清仓 {held} 股")
+                print(f"  卖出 {s}({config.ETF_POOL[s]}): 目标权重 0,清仓 {held} 股")
+                changed = True
+        # 信号池之外的持仓(如误买错代码)一律清仓
+        for s, held in holdings.items():
+            if s not in config.ETF_POOL and held > 0:
+                orders.append(("卖出", s, held))
+                print(f"  卖出 {s}: 非信号池标的(疑似误买),清仓 {held} 股")
                 changed = True
         if not changed:
             print("  无需调仓")
 
-    # 追加日志(整体重写,保证旧格式迁移后表头与数据列对齐)
-    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-    row = {"run_date": str(today), "signal_date": str(signal_date), "mode": args.mode}
-    row.update({s: round(float(w.get(s, 0.0)), 4) for s in config.ETF_POOL})
-    row["desc"] = describe(w)
-    cols = ["run_date", "signal_date", "mode", *config.ETF_POOL, "desc"]
-    out = pd.concat([log, pd.DataFrame([row])], ignore_index=True).reindex(columns=cols)
-    out.to_csv(LOG_PATH, index=False, encoding="utf-8-sig")
-    print(f"\n信号已记录: {LOG_PATH}")
+    if already:
+        print("\n(同一信号日期、同一模式已记录,不重复记录)")
+    else:
+        # 追加日志(整体重写,保证旧格式迁移后表头与数据列对齐)
+        os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+        row = {"run_date": str(today), "signal_date": str(signal_date), "mode": args.mode}
+        row.update({s: round(float(w.get(s, 0.0)), 4) for s in config.ETF_POOL})
+        row["desc"] = describe(w)
+        cols = ["run_date", "signal_date", "mode", *config.ETF_POOL, "desc"]
+        out = pd.concat([log, pd.DataFrame([row])], ignore_index=True).reindex(columns=cols)
+        out.to_csv(LOG_PATH, index=False, encoding="utf-8-sig")
+        print(f"\n信号已记录: {LOG_PATH}")
 
     # 即使本次无可执行计划,也要清除已被新信号取代的旧计划行
     write_planned(signal_date, orders, last_close, exec_date)

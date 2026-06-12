@@ -88,7 +88,9 @@ if echo "$OUTPUT" | grep -qE "买入|卖出"; then
 $SIGNAL
 
 ${HEADER:-调仓指令:}
-$ORDERS"
+$ORDERS
+
+⚠ 请按6位证券代码下单,成交前核对代码一致(同指数基金名称相近,勿凭名称选)"
 else
     enqueue "【ETF量化】今日无操作
 ━━━━━━━━━━━━

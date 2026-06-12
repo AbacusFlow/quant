@@ -97,7 +97,9 @@ jobs:
           $SIGNAL
 
           ${HEADER:-调仓指令:}
-          $(grep -E '买入|卖出' signal_output.txt)"
+          $(grep -E '买入|卖出' signal_output.txt)
+
+          ⚠ 请按6位证券代码下单,成交前核对代码一致(同指数基金名称相近,勿凭名称选)"
             else
               TEXT="【ETF量化】今日无操作
           ━━━━━━━━━━━━
