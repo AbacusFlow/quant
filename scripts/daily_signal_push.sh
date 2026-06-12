@@ -62,7 +62,7 @@ STATUS=$?
 echo "$OUTPUT" >> "$RUN_LOG"
 
 if [ $STATUS -ne 0 ]; then
-    enqueue "[量化] 信号脚本运行失败
+    enqueue "【ETF量化】信号脚本运行失败
 $OUTPUT"
     flush_spool
     exit 1
@@ -83,13 +83,15 @@ if echo "$OUTPUT" | grep -qE "买入|卖出"; then
     ORDERS=$(echo "$OUTPUT" | grep -E "买入|卖出")
     # 执行日措辞由 daily_signal.py 给出(今日/具体日期),不在此硬编码
     HEADER=$(echo "$OUTPUT" | grep "调仓指令" | head -1 | sed 's/^-*[[:space:]]*//; s/[[:space:]]*-*$//')
-    enqueue "[量化] 开盘需调仓!
+    enqueue "【ETF量化】开盘需调仓
+━━━━━━━━━━━━
 $SIGNAL
 
 ${HEADER:-调仓指令:}
 $ORDERS"
 else
-    enqueue "[量化] 今日无操作
+    enqueue "【ETF量化】今日无操作
+━━━━━━━━━━━━
 $SIGNAL"
 fi
 flush_spool

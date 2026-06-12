@@ -75,12 +75,15 @@ jobs:
           # 执行日措辞由 daily_signal.py 给出(今日/具体日期),不在此硬编码
           HEADER=$(grep "调仓指令" signal_output.txt | head -1 | sed 's/^-*[[:space:]]*//; s/[[:space:]]*-*$//')
           if grep -qE "买入|卖出" signal_output.txt; then
-            TEXT="[量化] 开盘需调仓!
+            TEXT="【ETF量化】开盘需调仓
+          ━━━━━━━━━━━━
           $SIGNAL
+
           ${HEADER:-调仓指令:}
           $(grep -E '买入|卖出' signal_output.txt)"
           else
-            TEXT="[量化] 今日无操作
+            TEXT="【ETF量化】今日无操作
+          ━━━━━━━━━━━━
           $SIGNAL"
           fi
           RESP=$(curl -sS --fail --max-time 20 "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
