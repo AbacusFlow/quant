@@ -46,6 +46,19 @@ jobs:
           set -o pipefail
           python daily_signal.py --mode "$SIGNAL_MODE" --capital "$SIGNAL_CAPITAL" | tee signal_output.txt
 
+      - name: 昨收校验(只告警不阻断)
+        id: price_check
+        run: |
+          # 不用管道,避免 tee 吞掉退出码;启动失败(语法/import错误)也写 ⚠ 行,保持只告警不阻断
+          python check_prices.py > price_check.txt 2>&1 \
+            || echo "⚠ 昨收校验脚本启动失败(exit $?),见 CI 日志" >> price_check.txt
+          cat price_check.txt
+          if grep -q '⚠' price_check.txt; then
+            echo "has_warn=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_warn=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # 先持久化日志再推送:提交失败则整个 job 失败且不发推送,
       # 重跑时 daily_signal 幂等(同信号日期+模式不重复记录),不会重复推送。
       - name: 提交信号日志
@@ -64,27 +77,42 @@ jobs:
           git push origin "HEAD:${GITHUB_REF_NAME}"
           echo "new_signal=true" >> "$GITHUB_OUTPUT"
 
+      # 有新信号或有数据校验告警时都推送(数据 stale 时往往无新信号,告警更要送达)
       - name: Telegram 推送
-        if: steps.commit_log.outputs.new_signal == 'true'
+        if: steps.commit_log.outputs.new_signal == 'true' || steps.price_check.outputs.has_warn == 'true'
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          NEW_SIGNAL: ${{ steps.commit_log.outputs.new_signal }}
         run: |
           if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then echo "未配置 TG_BOT_TOKEN/TG_CHAT_ID,跳过推送"; exit 0; fi
-          SIGNAL=$(grep "目标持仓" signal_output.txt | head -1)
-          # 执行日措辞由 daily_signal.py 给出(今日/具体日期),不在此硬编码
-          HEADER=$(grep "调仓指令" signal_output.txt | head -1 | sed 's/^-*[[:space:]]*//; s/[[:space:]]*-*$//')
-          if grep -qE "买入|卖出" signal_output.txt; then
-            TEXT="【ETF量化】开盘需调仓
+          WARN=$(grep '⚠' price_check.txt 2>/dev/null || true)
+          if [ "$NEW_SIGNAL" = "true" ]; then
+            SIGNAL=$(grep "目标持仓" signal_output.txt | head -1)
+            # 执行日措辞由 daily_signal.py 给出(今日/具体日期),不在此硬编码
+            HEADER=$(grep "调仓指令" signal_output.txt | head -1 | sed 's/^-*[[:space:]]*//; s/[[:space:]]*-*$//')
+            if grep -qE "买入|卖出" signal_output.txt; then
+              TEXT="【ETF量化】开盘需调仓
           ━━━━━━━━━━━━
           $SIGNAL
 
           ${HEADER:-调仓指令:}
           $(grep -E '买入|卖出' signal_output.txt)"
-          else
-            TEXT="【ETF量化】今日无操作
+            else
+              TEXT="【ETF量化】今日无操作
           ━━━━━━━━━━━━
           $SIGNAL"
+            fi
+            if [ -n "$WARN" ]; then
+              TEXT="$TEXT
+
+          数据校验告警:
+          $WARN"
+            fi
+          else
+            TEXT="【ETF量化】数据校验告警
+          ━━━━━━━━━━━━
+          $WARN"
           fi
           RESP=$(curl -sS --fail --max-time 20 "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TG_CHAT_ID}" --data-urlencode "text=$TEXT")
