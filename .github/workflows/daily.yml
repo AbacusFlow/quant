@@ -59,6 +59,21 @@ jobs:
             echo "has_warn=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: 回撤检查(事件触发,只告警不阻断)
+        id: risk_check
+        env:
+          SIGNAL_MODE: ${{ vars.SIGNAL_MODE || 'single' }}
+          SIGNAL_CAPITAL: ${{ vars.SIGNAL_CAPITAL || '10000' }}
+        run: |
+          python check_risk.py --mode "$SIGNAL_MODE" --capital "$SIGNAL_CAPITAL" > risk_check.txt 2>&1 \
+            || echo "⚠ 回撤检查脚本启动失败(exit $?),见 CI 日志" >> risk_check.txt
+          cat risk_check.txt
+          if grep -q '⚠' risk_check.txt; then
+            echo "has_alert=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_alert=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # 先持久化日志再推送:提交失败则整个 job 失败且不发推送,
       # 重跑时 daily_signal 幂等(同信号日期+模式不重复记录),不会重复推送。
       - name: 提交信号日志
@@ -77,9 +92,9 @@ jobs:
           git push origin "HEAD:${GITHUB_REF_NAME}"
           echo "new_signal=true" >> "$GITHUB_OUTPUT"
 
-      # 有新信号或有数据校验告警时都推送(数据 stale 时往往无新信号,告警更要送达)
+      # 有新信号、数据校验告警或回撤告警时都推送(数据 stale 时往往无新信号,告警更要送达)
       - name: Telegram 推送
-        if: steps.commit_log.outputs.new_signal == 'true' || steps.price_check.outputs.has_warn == 'true'
+        if: steps.commit_log.outputs.new_signal == 'true' || steps.price_check.outputs.has_warn == 'true' || steps.risk_check.outputs.has_alert == 'true'
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
@@ -87,6 +102,18 @@ jobs:
         run: |
           if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then echo "未配置 TG_BOT_TOKEN/TG_CHAT_ID,跳过推送"; exit 0; fi
           WARN=$(grep '⚠' price_check.txt 2>/dev/null || true)
+          RISK=$(grep '⚠' risk_check.txt 2>/dev/null || true)
+          ALERTS=""
+          if [ -n "$WARN" ]; then
+            ALERTS="数据校验告警:
+          $WARN"
+          fi
+          if [ -n "$RISK" ]; then
+            ALERTS="${ALERTS:+$ALERTS
+
+          }回撤告警:
+          $RISK"
+          fi
           if [ "$NEW_SIGNAL" = "true" ]; then
             SIGNAL=$(grep "目标持仓" signal_output.txt | head -1)
             # 执行日措辞由 daily_signal.py 给出(今日/具体日期),不在此硬编码
@@ -105,16 +132,15 @@ jobs:
           ━━━━━━━━━━━━
           $SIGNAL"
             fi
-            if [ -n "$WARN" ]; then
+            if [ -n "$ALERTS" ]; then
               TEXT="$TEXT
 
-          数据校验告警:
-          $WARN"
+          $ALERTS"
             fi
           else
-            TEXT="【ETF量化】数据校验告警
+            TEXT="【ETF量化】告警
           ━━━━━━━━━━━━
-          $WARN"
+          $ALERTS"
           fi
           RESP=$(curl -sS --fail --max-time 20 "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TG_CHAT_ID}" --data-urlencode "text=$TEXT")
