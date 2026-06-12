@@ -1,4 +1,4 @@
-# 每个交易日早上开盘前:跑信号(基于前一交易日收盘,数据源夜间已更新)→ 微信推送 →
+# 每个交易日早上开盘前:跑信号(基于前一交易日收盘,数据源夜间已更新)→ Telegram 推送 →
 # 提交信号日志 → 生成并部署 Pages 报告。推送到手后当天开盘(9:30)即可执行。
 # 两个触发时间互为兜底(同一信号日期+模式幂等,不会重复记录/推送)。
 # 节假日无新数据时信号日期不变,自动跳过推送。
@@ -64,26 +64,29 @@ jobs:
           git push origin "HEAD:${GITHUB_REF_NAME}"
           echo "new_signal=true" >> "$GITHUB_OUTPUT"
 
-      - name: 微信推送(Server酱)
+      - name: Telegram 推送
         if: steps.commit_log.outputs.new_signal == 'true'
         env:
-          SENDKEY: ${{ secrets.SENDKEY }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          if [ -z "$SENDKEY" ]; then echo "未配置 SENDKEY,跳过推送"; exit 0; fi
+          if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then echo "未配置 TG_BOT_TOKEN/TG_CHAT_ID,跳过推送"; exit 0; fi
           SIGNAL=$(grep "目标持仓" signal_output.txt | head -1)
+          # 执行日措辞由 daily_signal.py 给出(今日/具体日期),不在此硬编码
+          HEADER=$(grep "调仓指令" signal_output.txt | head -1 | sed 's/^-*[[:space:]]*//; s/[[:space:]]*-*$//')
           if grep -qE "买入|卖出" signal_output.txt; then
-            TITLE="[量化] 今早开盘需调仓!"
-            BODY="$SIGNAL
-          调仓指令(今日开盘 09:30 执行):
+            TEXT="[量化] 开盘需调仓!
+          $SIGNAL
+          ${HEADER:-调仓指令:}
           $(grep -E '买入|卖出' signal_output.txt)"
           else
-            TITLE="[量化] 今日无操作"
-            BODY="$SIGNAL"
+            TEXT="[量化] 今日无操作
+          $SIGNAL"
           fi
-          RESP=$(curl -sS --fail --max-time 20 "https://sctapi.ftqq.com/${SENDKEY}.send" \
-            --data-urlencode "title=$TITLE" --data-urlencode "desp=$BODY")
-          echo "$RESP" | grep -q '"code" *: *0' || { echo "推送失败: $RESP"; exit 1; }
-          echo "推送成功: $TITLE"
+          RESP=$(curl -sS --fail --max-time 20 "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" --data-urlencode "text=$TEXT")
+          echo "$RESP" | grep -q '"ok" *: *true' || { echo "推送失败: $RESP"; exit 1; }
+          echo "推送成功"
 
       - name: 生成网页报告
         env:

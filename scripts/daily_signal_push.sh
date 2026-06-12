@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 模拟盘信号自动跑 + Server酱微信推送(手动备用;正式自动化在 GitHub Actions)。
+# 模拟盘信号自动跑 + Telegram 机器人推送(手动备用;正式自动化在 GitHub Actions)。
 # cron(交易日早上开盘前,基于前一交易日收盘;09:05 为兜底:信号重复时仅补发未送达的推送):
 #   35 8 * * 1-5  /home/logan/Projects/quant/scripts/daily_signal_push.sh
 #   5  9 * * 1-5  /home/logan/Projects/quant/scripts/daily_signal_push.sh
@@ -10,7 +10,8 @@ cd "$PROJECT_DIR"
 
 # 只解析白名单键,不把 .env 当 shell 执行
 envval() { [ -f .env ] && grep -E "^$1=" .env | tail -1 | cut -d= -f2-; }
-SENDKEY="$(envval SENDKEY || true)"
+TG_BOT_TOKEN="$(envval TG_BOT_TOKEN || true)"
+TG_CHAT_ID="$(envval TG_CHAT_ID || true)"
 MODE="$(envval SIGNAL_MODE || true)"; MODE="${MODE:-single}"
 CAPITAL="$(envval SIGNAL_CAPITAL || true)"; CAPITAL="${CAPITAL:-10000}"
 
@@ -27,21 +28,21 @@ enqueue() {
 }
 
 # 按时间顺序推送队列中所有消息;失败即停,留待下次运行重试。
-# 仅当 Server酱 应用层返回 code=0 才视为送达;未配置 SENDKEY 视为投递失败,
+# 仅当 Telegram 返回 ok=true 才视为送达;未配置 TG_BOT_TOKEN/TG_CHAT_ID 视为投递失败,
 # 队列保留(填好 .env 后下次运行自动补发)。
 flush_spool() {
     local f title body resp
     for f in $(ls "$SPOOL"/*.msg 2>/dev/null | sort); do
-        if [ -z "$SENDKEY" ]; then
-            echo "(未配置 SENDKEY,消息保留待补发: $f)" >> "$RUN_LOG"
+        if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
+            echo "(未配置 TG_BOT_TOKEN/TG_CHAT_ID,消息保留待补发: $f)" >> "$RUN_LOG"
             return 1
         fi
         title=$(head -1 "$f")
-        body=$(tail -n +2 "$f")
-        resp=$(curl -sS --fail --max-time 15 "https://sctapi.ftqq.com/${SENDKEY}.send" \
-            --data-urlencode "title=$title" \
-            --data-urlencode "desp=$body" 2>&1)
-        if [ $? -eq 0 ] && echo "$resp" | grep -q '"code" *: *0'; then
+        body=$(cat "$f")
+        resp=$(curl -sS --fail --max-time 15 "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "text=$body" 2>&1)
+        if [ $? -eq 0 ] && echo "$resp" | grep -q '"ok" *: *true'; then
             echo "推送成功: $title" >> "$RUN_LOG"
             rm -f "$f"
         else
@@ -80,10 +81,12 @@ if [ -z "$SIGNAL" ]; then
 fi
 if echo "$OUTPUT" | grep -qE "买入|卖出"; then
     ORDERS=$(echo "$OUTPUT" | grep -E "买入|卖出")
-    enqueue "[量化] 今早开盘需调仓!
+    # 执行日措辞由 daily_signal.py 给出(今日/具体日期),不在此硬编码
+    HEADER=$(echo "$OUTPUT" | grep "调仓指令" | head -1 | sed 's/^-*[[:space:]]*//; s/[[:space:]]*-*$//')
+    enqueue "[量化] 开盘需调仓!
 $SIGNAL
 
-调仓指令(今日开盘 09:30 执行):
+${HEADER:-调仓指令:}
 $ORDERS"
 else
     enqueue "[量化] 今日无操作
