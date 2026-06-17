@@ -357,12 +357,16 @@ def main():
     parser.add_argument("--mode", choices=("single", "ensemble"), default="single")
     parser.add_argument("--capital", type=float, default=10000)
     parser.add_argument("--end", default=dt.date.today().isoformat())
+    parser.add_argument("--vol-target", action=argparse.BooleanOptionalAction,
+                        default=config.VOL_TARGET_ENABLED,
+                        help="波动率目标覆盖层(默认随 config.VOL_TARGET_ENABLED),需与线上口径一致")
     args = parser.parse_args()
 
     prices = load_pool(config.ROTATION_START, args.end)
     closes = closes_table(prices)
     weights = build_weights(closes, mode=args.mode, lookback=config.ROTATION_LOOKBACK,
-                            buffer=config.ROTATION_BUFFER, dd_control=False)
+                            buffer=config.ROTATION_BUFFER, dd_control=False,
+                            vol_control=args.vol_target)
     result = run_portfolio_backtest(prices, weights, initial_capital=args.capital, stamp_tax=False)
     equity = result.equity
 

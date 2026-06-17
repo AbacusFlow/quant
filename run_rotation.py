@@ -52,8 +52,11 @@ def report_segment(equity: pd.Series, label: str) -> dict | None:
 
 
 def build_weights(closes: pd.DataFrame, mode: str, lookback: int, buffer: float,
-                  dd_control: bool) -> pd.DataFrame:
-    """根据模式生成目标权重(可选叠加回撤控制)"""
+                  dd_control: bool, vol_control: bool = False) -> pd.DataFrame:
+    """根据模式生成目标权重(可选叠加回撤控制、波动率目标)。
+
+    叠加顺序:先回撤控制(dd_control)后波动率目标(vol_control)。
+    """
     if mode == "single":
         weights = strategy.etf_momentum_rotation(closes, lookback=lookback, buffer=buffer)
     else:
@@ -61,14 +64,17 @@ def build_weights(closes: pd.DataFrame, mode: str, lookback: int, buffer: float,
     if dd_control:
         weights = strategy.apply_drawdown_control(
             weights, closes, ma_window=config.DD_MA_WINDOW, scale=config.DD_SCALE)
+    if vol_control:
+        weights = strategy.apply_vol_targeting(
+            weights, closes, lookback=config.VOL_TARGET_LOOKBACK)
     return weights
 
 
 def run_once(prices: dict[str, pd.DataFrame], lookback: int, buffer: float,
              mode: str = "single", dd_control: bool = False,
-             capital: float = config.INITIAL_CAPITAL) -> tuple:
+             capital: float = config.INITIAL_CAPITAL, vol_control: bool = False) -> tuple:
     closes = closes_table(prices)
-    weights = build_weights(closes, mode, lookback, buffer, dd_control)
+    weights = build_weights(closes, mode, lookback, buffer, dd_control, vol_control)
     result = run_portfolio_backtest(prices, weights, initial_capital=capital, stamp_tax=False)
     return result, weights
 
@@ -86,6 +92,8 @@ def main():
                         help="single=单一lookback, ensemble=多周期集成(默认)")
     parser.add_argument("--dd", action="store_true",
                         help="开启回撤控制(回测显示年化损耗约3%%、回撤仅改善约2pp,默认关闭)")
+    parser.add_argument("--vol-target", action="store_true",
+                        help="开启波动率目标覆盖层(研究显示夏普↑/回撤↓、年化基本不变,默认关闭)")
     parser.add_argument("--compare", action="store_true", help="对比 单一/集成/集成+回撤控制")
     args = parser.parse_args()
 
@@ -101,7 +109,7 @@ def main():
         rows = []
         for label, mode, dd in variants:
             result, _ = run_once(prices, args.lookback, args.buffer, mode=mode, dd_control=dd,
-                                 capital=args.capital)
+                                 capital=args.capital, vol_control=args.vol_target)
             m = metrics_mod.equity_metrics(result.equity)
             oos = result.equity.loc[config.OOS_SPLIT:]
             m_oos = metrics_mod.equity_metrics(oos) if len(oos) >= 2 else None
@@ -122,7 +130,8 @@ def main():
         print(f"\n========== 参数敏感性: lookback 扫描 (mode=single) ==========")
         rows = []
         for lb in (10, 15, 20, 25, 30, 40, 60):
-            result, _ = run_once(prices, lb, args.buffer, mode="single", capital=args.capital)
+            result, _ = run_once(prices, lb, args.buffer, mode="single", capital=args.capital,
+                                 vol_control=args.vol_target)
             m = metrics_mod.equity_metrics(result.equity)
             oos = result.equity.loc[config.OOS_SPLIT:]
             m_oos = metrics_mod.equity_metrics(oos) if len(oos) >= 2 else None
@@ -140,10 +149,11 @@ def main():
 
     dd_control = args.dd
     result, weights = run_once(prices, args.lookback, args.buffer, mode=args.mode, dd_control=dd_control,
-                               capital=args.capital)
+                               capital=args.capital, vol_control=args.vol_target)
     equity = result.equity
 
-    desc = f"mode={args.mode}, 回撤控制={'开' if dd_control else '关'}, buffer={args.buffer}, 本金={args.capital:,.0f}"
+    desc = (f"mode={args.mode}, 回撤控制={'开' if dd_control else '关'}, "
+            f"波动率目标={'开' if args.vol_target else '关'}, buffer={args.buffer}, 本金={args.capital:,.0f}")
     if args.mode == "single":
         desc += f", lookback={args.lookback}"
     print(f"\n========== ETF 动量轮动 ({desc}) ==========")

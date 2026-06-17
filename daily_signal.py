@@ -38,7 +38,7 @@ def data_end_date(now: dt.datetime) -> dt.date:
     return now.date()
 
 
-def latest_weights(end: str, mode: str) -> tuple[pd.Series, pd.Series]:
+def latest_weights(end: str, mode: str, vol_control: bool = False) -> tuple[pd.Series, pd.Series]:
     """返回 (最新目标权重, 最新收盘价),用于信号与下单股数估算"""
     prices = {}
     for symbol, name in config.ETF_POOL.items():
@@ -47,7 +47,7 @@ def latest_weights(end: str, mode: str) -> tuple[pd.Series, pd.Series]:
     closes = closes.loc[:end]  # 防御:缓存若混入 end 之后的脏数据也不参与信号
     weights = build_weights(
         closes, mode=mode, lookback=config.ROTATION_LOOKBACK,
-        buffer=config.ROTATION_BUFFER, dd_control=False,
+        buffer=config.ROTATION_BUFFER, dd_control=False, vol_control=vol_control,
     )
     return weights.iloc[-1], closes.iloc[-1]
 
@@ -130,6 +130,10 @@ def main():
                         help="single=整仓切换(小资金默认), ensemble=多周期集成(本金≥10万)")
     parser.add_argument("--capital", type=float, default=None,
                         help="账户资金(元),提供后调仓指令附带预估下单股数(按昨收估算)")
+    parser.add_argument("--vol-target", action=argparse.BooleanOptionalAction,
+                        default=config.VOL_TARGET_ENABLED,
+                        help="波动率目标覆盖层(默认随 config.VOL_TARGET_ENABLED);"
+                             "影子用法:--vol-target 看开启后的调仓指令")
     args = parser.parse_args()
     if args.capital is not None and (not math.isfinite(args.capital) or args.capital <= 0):
         parser.error("--capital 必须是正数")
@@ -138,10 +142,11 @@ def main():
     today = now.date()
 
     end = data_end_date(now).isoformat()
-    w, last_close = latest_weights(end, args.mode)
+    w, last_close = latest_weights(end, args.mode, vol_control=args.vol_target)
     signal_date = w.name.date()
 
-    print(f"\n========== 最新信号 (mode={args.mode}, 数据截至 {signal_date}) ==========")
+    vt_word = "开" if args.vol_target else "关"
+    print(f"\n========== 最新信号 (mode={args.mode}, 波动率目标={vt_word}, 数据截至 {signal_date}) ==========")
     print(f"目标持仓: {describe(w)}")
 
     # 读取历史日志(兼容无 mode 列的旧格式:旧脚本固定 ensemble 口径)

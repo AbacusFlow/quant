@@ -24,7 +24,7 @@ from run_rotation import build_weights, closes_table, load_pool
 DD_ALERT_MULT = 1.5  # 实盘回撤超过回测最大回撤的 1.5 倍 → 暂停加仓、深度复盘
 
 
-def check(mode: str, capital: float) -> None:
+def check(mode: str, capital: float, vol_control: bool = False) -> None:
     execs = load_executions()
     confirmed = execs[execs["status"] != "计划"] if execs is not None else pd.DataFrame()
     if confirmed.empty:
@@ -41,9 +41,10 @@ def check(mode: str, capital: float) -> None:
               f"{closes.index[-1].date()},行情未更新,跳过回撤检查")
         return
 
-    # 回测基线最大回撤(与 report_web 同口径:无回撤控制)
+    # 回测基线最大回撤(与 report_web/线上同口径:无回撤控制,波动率目标随线上开关)
     weights = build_weights(closes, mode=mode, lookback=config.ROTATION_LOOKBACK,
-                            buffer=config.ROTATION_BUFFER, dd_control=False)
+                            buffer=config.ROTATION_BUFFER, dd_control=False,
+                            vol_control=vol_control)
     bt_equity = run_portfolio_backtest(prices, weights, initial_capital=capital,
                                        stamp_tax=False).equity
     bt_maxdd = -float(metrics_mod.equity_metrics(bt_equity)["最大回撤"])  # 转为正数
@@ -78,9 +79,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="实盘回撤事件检查(只告警不阻断)")
     parser.add_argument("--mode", choices=("single", "ensemble"), default="single")
     parser.add_argument("--capital", type=float, default=10000)
+    parser.add_argument("--vol-target", action=argparse.BooleanOptionalAction,
+                        default=config.VOL_TARGET_ENABLED,
+                        help="波动率目标覆盖层(默认随 config.VOL_TARGET_ENABLED),"
+                             "回撤告警基线须与线上策略同口径")
     args = parser.parse_args()
     try:
-        check(args.mode, args.capital)
+        check(args.mode, args.capital, vol_control=args.vol_target)
     except Exception as e:
         print(f"⚠ 回撤检查脚本异常: {e}")
     return 0

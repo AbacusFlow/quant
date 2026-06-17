@@ -3,6 +3,7 @@
 统一接口:每个策略接收日线 DataFrame(open/high/low/close/volume),
 返回目标仓位序列(0=空仓, 1=满仓),信号基于当日收盘数据计算,次日开盘执行(T+1)。
 """
+import numpy as np
 import pandas as pd
 
 
@@ -146,6 +147,29 @@ def apply_drawdown_control(
     factor = pd.Series(1.0, index=weights.index)
     factor[virtual < ma] = scale
     return weights.mul(factor, axis=0)
+
+
+def apply_vol_targeting(
+    weights: pd.DataFrame,
+    closes: pd.DataFrame,
+    lookback: int = 20,
+) -> pd.DataFrame:
+    """波动率目标:策略自身已实现波动超过其历史中位时按比例降仓,封顶 1.0(无杠杆)。
+
+    经济逻辑(Barroso & Santa-Clara 2015):动量崩盘集中在高波动期,据此降敞口
+    可显著改善稳定性(walk-forward 夏普↑、最大回撤↓),年化基本不变。
+
+    - 自适应目标:用因果扩张中位数(expanding median),不引入固定 target_vol 旋钮
+    - 无前视:scale_t 仅用 ≤T 的收盘价(与 apply_drawdown_control 同口径);
+      引擎再 shift(1) 到 T+1 执行
+    - scale ∈ (0, 1],只降不加杠杆;暖机期/波动低于历史中位时 scale==1(权重不变)
+    """
+    rets = closes.pct_change(fill_method=None).fillna(0.0)
+    strat_ret = (weights.shift(1).fillna(0.0) * rets).sum(axis=1)
+    realized = strat_ret.rolling(lookback).std() * np.sqrt(252)
+    target = realized.expanding(min_periods=lookback).median()
+    scale = (target / realized).clip(upper=1.0).fillna(1.0)
+    return weights.mul(scale, axis=0)
 
 
 # 策略注册表:名称 -> (函数, 说明)

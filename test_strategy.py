@@ -5,7 +5,12 @@
 import numpy as np
 import pandas as pd
 
-from strategy import apply_drawdown_control, etf_momentum_ensemble, etf_momentum_rotation
+from strategy import (
+    apply_drawdown_control,
+    apply_vol_targeting,
+    etf_momentum_ensemble,
+    etf_momentum_rotation,
+)
 
 
 def make_closes(days: int = 120) -> pd.DataFrame:
@@ -69,6 +74,49 @@ def test_drawdown_control_no_lookahead():
     full = apply_drawdown_control(weights, closes, ma_window=20)
     part = apply_drawdown_control(weights.iloc[:80], closes.iloc[:80], ma_window=20)
     assert np.allclose(full.iloc[:80].values, part.values)
+
+
+def test_vol_targeting_no_lookahead():
+    """波动率目标 T 日系数只依赖 T 日及之前的数据:截断未来不改变历史系数"""
+    closes = make_closes(120)
+    weights = etf_momentum_rotation(closes, lookback=20)
+    full = apply_vol_targeting(weights, closes, lookback=20)
+    part = apply_vol_targeting(weights.iloc[:80], closes.iloc[:80], lookback=20)
+    assert np.allclose(full.iloc[:80].values, part.values)
+
+
+def test_vol_targeting_scales_down():
+    """波动放大的末段应降仓(factor<1),且任何时候不加杠杆(factor<=1)"""
+    days = 300
+    idx = pd.date_range("2024-01-01", periods=days, freq="B")
+    t = np.arange(days)
+    # 前半段低波动、后半段高波动(均值约 0 的确定性振荡)
+    amp = np.where(t < 150, 0.004, 0.04)
+    rets = amp * np.sin(t)
+    price = 10 * np.cumprod(1 + rets)
+    closes = pd.DataFrame({"A": price, "B": np.full(days, 10.0)}, index=idx)
+    weights = pd.DataFrame({"A": 1.0, "B": 0.0}, index=idx)
+
+    out = apply_vol_targeting(weights, closes, lookback=20)
+    factor = out["A"]
+    assert (factor <= 1.0 + 1e-9).all()        # 无杠杆,封顶 1.0
+    assert (factor.iloc[-20:] < 1.0).all()     # 高波动末段已实现波动超历史中位 → 降仓
+
+
+def test_vol_targeting_warmup_full():
+    """暖机期与波动不超历史中位时 factor==1(权重不变):波动单调下降则始终满仓"""
+    days = 120
+    idx = pd.date_range("2024-01-01", periods=days, freq="B")
+    t = np.arange(days)
+    # 波动单调下降:每个 T 的已实现波动都是历史最小,扩张中位数 >= 当前 → scale 恒为 1
+    amp = np.linspace(0.05, 0.005, days)
+    rets = amp * np.sin(t)
+    price = 10 * np.cumprod(1 + rets)
+    closes = pd.DataFrame({"A": price, "B": np.full(days, 10.0)}, index=idx)
+    weights = pd.DataFrame({"A": 1.0, "B": 0.0}, index=idx)
+
+    out = apply_vol_targeting(weights, closes, lookback=20)
+    assert np.allclose(out["A"].values, 1.0)   # 含暖机期(realized=NaN→1)与低波动段
 
 
 if __name__ == "__main__":
