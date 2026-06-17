@@ -136,14 +136,6 @@ def main():
 
     now = dt.datetime.now(ZoneInfo("Asia/Shanghai"))  # 统一用A股时区,避免本地/CI时区不一致
     today = now.date()
-    try:
-        # 非交易日(节假日/周末)跳过:避免假期早上推送"今日执行"、又因幂等
-        # 挡掉真正开市日的推送;日历不可用时保持原行为(幂等仍兜底)
-        if pd.Timestamp(today) not in data.get_trade_dates():
-            print(f"{today} 非A股交易日,跳过信号记录与计划生成")
-            return
-    except Exception as e:
-        print(f"(交易日历不可用,继续运行: {e})")
 
     end = data_end_date(now).isoformat()
     w, last_close = latest_weights(end, args.mode)
@@ -165,6 +157,20 @@ def main():
     # 但计划生成仍要跑(流水可能在两次运行之间被修正,如误买后改持仓)
     already = (not log.empty
                and ((log["signal_date"] == str(signal_date)) & (log["mode"] == args.mode)).any())
+
+    # 跳过逻辑:仅当"今天非交易日 且 该信号已记录"时跳过(无新信号可恢复)。
+    # 用数据驱动的 signal_date 判断,而非运行时 today:GitHub 定时常迟到数小时,
+    # 交易日晚间任务可能被推迟到次日(周末/假期凌晨)才跑,此时 today 虽非交易日,
+    # 但上一交易日的信号正是次日开盘前要送达的,必须补出(否则周一/节后开盘漏信号);
+    # 同时避免真正的周末/假期空跑重复推送(已记录则跳过)。日历不可用时不跳过,交给幂等兜底。
+    try:
+        trading_today = pd.Timestamp(today) in data.get_trade_dates()
+    except Exception as e:
+        print(f"(交易日历不可用,继续运行: {e})")
+        trading_today = True
+    if not trading_today and already:
+        print(f"{today} 非A股交易日,且最新信号({signal_date})已记录,跳过")
+        return
 
     # 执行日 = 信号日的下一交易日;早上开盘前运行时即今天
     exec_date = next_trade_date(signal_date)
