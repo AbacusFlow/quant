@@ -152,6 +152,10 @@ jobs:
           ━━━━━━━━━━━━
           $ALERTS"
           fi
+          # 末尾附 Pages 报告链接,点开即看实盘/模拟净值与明细
+          TEXT="$TEXT
+
+          📊 完整报告 https://cyl-logan.github.io/quant/"
           RESP=$(curl -sS --fail --max-time 20 "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TG_CHAT_ID}" --data-urlencode "text=$TEXT")
           echo "$RESP" | grep -q '"ok" *: *true' || { echo "推送失败: $RESP"; exit 1; }
