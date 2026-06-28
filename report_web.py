@@ -352,6 +352,53 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
             f'{guide}')
 
 
+ASSETS_DIR = "assets"
+
+
+def etrade_comparison_html() -> str:
+    """一次性研究对比段:本策略 vs 第三方 eTrade Dynamic TopN V2。
+
+    静态内容(不进 CI、不每日重算、不 vendoring 第三方策略源):图片为预先
+    生成、提交在 assets/ 下的同窗口归一化净值对比;数字为该次回测的固定结果。
+    资产缺失时返回空串,不影响整页生成。
+    """
+    img_path = os.path.join(ASSETS_DIR, "compare_etrade.png")
+    if not os.path.exists(img_path):
+        return ""
+    with open(img_path, "rb") as f:
+        img = base64.b64encode(f.read()).decode()
+    cards = (
+        '<div class="cards">'
+        '<div class="card"><div class="card-label">本策略 年化</div>'
+        '<div class="card-value pos">34.8%</div></div>'
+        '<div class="card"><div class="card-label">eTrade 年化</div>'
+        '<div class="card-value pos">32.1%</div></div>'
+        '<div class="card"><div class="card-label">本策略 夏普</div>'
+        '<div class="card-value">1.19</div></div>'
+        '<div class="card"><div class="card-label">eTrade 夏普</div>'
+        '<div class="card-value">1.03</div></div>'
+        '<div class="card"><div class="card-label">本策略 最大回撤</div>'
+        '<div class="card-value neg">-25.5%</div></div>'
+        '<div class="card"><div class="card-label">eTrade 最大回撤</div>'
+        '<div class="card-value neg">-32.5%</div></div>'
+        '</div>'
+    )
+    return (
+        '<h2>研究对比:本策略 vs 第三方 eTrade Dynamic TopN V2</h2>'
+        '<p class="note">一次性研究记录(非实时跟踪)。用本仓库同一套数据管道、独立复现'
+        ' eTrade 公开代码(13 只跨境/商品/债券交易池),回测区间 2023-01-03 ~ 2026-06-26'
+        ',与本策略 ensemble 在同窗口、同口径对齐归一化对比。</p>'
+        f'{cards}'
+        f'<img src="data:image/png;base64,{img}" alt="本策略 vs eTrade 对比">'
+        '<p class="note">要点:① 同窗口下本策略四项(收益/年化/夏普/回撤)全胜;'
+        '② eTrade 公开代码独立复现的最大回撤 -32.5%、年化波动 32%,显著高于其报告宣称的'
+        ' -9% / 18.6% 年化——其低回撤数字疑似来自挑选的验证窗口与其自有 parquet 数据,'
+        '不可在独立数据上复现;③ 值得借鉴的是其防御性 sleeve(金/债)、多因子打分与'
+        ' TopN≥2 分散的思路,而非其偏门 QDII/商品交易池(有溢价/限购的实盘摩擦,'
+        '且其回测未建模最低佣金/整手)。</p>'
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="生成静态网页报告")
     parser.add_argument("--mode", choices=("single", "ensemble"), default="single")
@@ -506,6 +553,8 @@ img {{ max-width: 100%; background: #fff; border-radius: 6px; box-shadow: 0 1px 
 <tr><th>信号日期</th><th>模式</th><th>目标持仓</th></tr>
 {log_rows or '<tr><td colspan="3">暂无记录</td></tr>'}
 </table>
+
+{etrade_comparison_html()}
 
 <p class="note">免责声明:回测与模拟盘结果不代表未来收益,本页面仅供学习记录。</p>
 </body>
