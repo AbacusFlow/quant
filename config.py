@@ -44,6 +44,7 @@ DD_MA_WINDOW = 60           # 回撤控制:虚拟净值均线窗口
 DD_SCALE = 0.5              # 跌破均线时仓位缩放系数
 VOL_TARGET_ENABLED = False  # 波动率目标覆盖层默认关闭(本地/无 flag 时的默认);线上由 repo Variable SIGNAL_VOL_TARGET 控制
 VOL_TARGET_LOOKBACK = 20    # 已实现波动率回看天数(研究验证 20/40/60 稳健)
+SLEEVE_ENABLED = False      # 防御 sleeve(残余现金金债各半)默认关闭;线上由 repo Variable SIGNAL_SLEEVE 控制
 REBALANCE_BAND = 0.02       # 再平衡带宽:目标与当前持仓偏离 < 2% 总资产时不交易
 ROTATION_START = "2015-01-01"
 OOS_SPLIT = "2022-01-01"    # 样本内/样本外分割点

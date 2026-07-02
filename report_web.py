@@ -363,6 +363,37 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
 ASSETS_DIR = "assets"
 
 
+def variants_comparison_html() -> str:
+    """策略演进对比段:V0 基线 → V1 波动率目标 → V2 防御 sleeve(最新,红色)。
+
+    静态研究记录(图与数字为一次性回测固定结果,见 scripts/experiment_sleeve.py);
+    资产缺失时返回空串,不影响整页生成。
+    """
+    img_path = os.path.join(ASSETS_DIR, "compare_variants.png")
+    if not os.path.exists(img_path):
+        return ""
+    with open(img_path, "rb") as f:
+        img = base64.b64encode(f.read()).decode()
+    return (
+        '<h2>策略演进:各版本实验结果对比</h2>'
+        '<p class="note">同窗口(2017-08-24 ~ 2026-07-01)、同引擎、11万本金真实费用。'
+        '<b style="color:#d62728">红色 = 当前最新版 V2</b>(波动率目标 + 防御 sleeve)。</p>'
+        '<table><tr><th>版本</th><th>年化</th><th>夏普</th><th>最大回撤</th>'
+        '<th>样本外年化</th><th>样本外夏普</th></tr>'
+        '<tr><td>V0 基线 ensemble</td><td>16.8%</td><td>0.75</td><td>-25.5%</td>'
+        '<td>27.9%</td><td>1.05</td></tr>'
+        '<tr><td>V1 +波动率目标</td><td>16.9%</td><td>0.96</td><td>-18.4%</td>'
+        '<td>28.8%</td><td>1.40</td></tr>'
+        '<tr style="color:#d62728;font-weight:bold"><td>V2 +防御sleeve(金债各半)【最新】</td>'
+        '<td>18.4%</td><td>1.00</td><td>-18.4%</td><td>32.2%</td><td>1.47</td></tr></table>'
+        f'<img src="data:image/png;base64,{img}" alt="策略演进对比">'
+        '<p class="note">V1 波动率目标:高波动期降仓,回撤 -25.5%→-18.4%,夏普 0.75→0.96'
+        '(收益基本不变,赚在"稳")。V2 防御 sleeve:滤空/降仓留下的闲置现金按金债各半路由'
+        '(518880 黄金 + 511260 国债),零参数;年化 +1.5pp、样本外 +3.4pp,'
+        '黄金在 2018/2022 股票熊年亦为正贡献。样本外 = 2022-01-01 起。</p>'
+    )
+
+
 def etrade_comparison_html() -> str:
     """一次性研究对比段:本策略 vs 第三方 eTrade Dynamic TopN V2。
 
@@ -415,13 +446,16 @@ def main():
     parser.add_argument("--vol-target", action=argparse.BooleanOptionalAction,
                         default=config.VOL_TARGET_ENABLED,
                         help="波动率目标覆盖层(默认随 config.VOL_TARGET_ENABLED),需与线上口径一致")
+    parser.add_argument("--sleeve", action=argparse.BooleanOptionalAction,
+                        default=config.SLEEVE_ENABLED,
+                        help="防御 sleeve(默认随 config.SLEEVE_ENABLED),需与线上口径一致")
     args = parser.parse_args()
 
     prices = load_pool(config.ROTATION_START, args.end)
     closes = closes_table(prices)
     weights = build_weights(closes, mode=args.mode, lookback=config.ROTATION_LOOKBACK,
                             buffer=config.ROTATION_BUFFER, dd_control=False,
-                            vol_control=args.vol_target)
+                            vol_control=args.vol_target, sleeve=args.sleeve)
     result = run_portfolio_backtest(prices, weights, initial_capital=args.capital, stamp_tax=False)
     equity = result.equity
 
@@ -562,6 +596,7 @@ img {{ max-width: 100%; background: #fff; border-radius: 6px; box-shadow: 0 1px 
 {log_rows or '<tr><td colspan="3">暂无记录</td></tr>'}
 </table>
 
+{variants_comparison_html()}
 {etrade_comparison_html()}
 
 <p class="note">免责声明:回测与模拟盘结果不代表未来收益,本页面仅供学习记录。</p>

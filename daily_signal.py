@@ -38,7 +38,8 @@ def data_end_date(now: dt.datetime) -> dt.date:
     return now.date()
 
 
-def latest_weights(end: str, mode: str, vol_control: bool = False) -> tuple[pd.Series, pd.Series]:
+def latest_weights(end: str, mode: str, vol_control: bool = False,
+                   sleeve: bool = False) -> tuple[pd.Series, pd.Series]:
     """返回 (最新目标权重, 最新收盘价),用于信号与下单股数估算"""
     prices = {}
     for symbol, name in config.ETF_POOL.items():
@@ -48,6 +49,7 @@ def latest_weights(end: str, mode: str, vol_control: bool = False) -> tuple[pd.S
     weights = build_weights(
         closes, mode=mode, lookback=config.ROTATION_LOOKBACK,
         buffer=config.ROTATION_BUFFER, dd_control=False, vol_control=vol_control,
+        sleeve=sleeve,
     )
     return weights.iloc[-1], closes.iloc[-1]
 
@@ -134,6 +136,9 @@ def main():
                         default=config.VOL_TARGET_ENABLED,
                         help="波动率目标覆盖层(默认随 config.VOL_TARGET_ENABLED);"
                              "影子用法:--vol-target 看开启后的调仓指令")
+    parser.add_argument("--sleeve", action=argparse.BooleanOptionalAction,
+                        default=config.SLEEVE_ENABLED,
+                        help="防御 sleeve:残余现金金债各半(默认随 config.SLEEVE_ENABLED)")
     args = parser.parse_args()
     if args.capital is not None and (not math.isfinite(args.capital) or args.capital <= 0):
         parser.error("--capital 必须是正数")
@@ -142,11 +147,13 @@ def main():
     today = now.date()
 
     end = data_end_date(now).isoformat()
-    w, last_close = latest_weights(end, args.mode, vol_control=args.vol_target)
+    w, last_close = latest_weights(end, args.mode, vol_control=args.vol_target,
+                                   sleeve=args.sleeve)
     signal_date = w.name.date()
 
     vt_word = "开" if args.vol_target else "关"
-    print(f"\n========== 最新信号 (mode={args.mode}, 波动率目标={vt_word}, 数据截至 {signal_date}) ==========")
+    sl_word = "开" if args.sleeve else "关"
+    print(f"\n========== 最新信号 (mode={args.mode}, 波动率目标={vt_word}, 防御sleeve={sl_word}, 数据截至 {signal_date}) ==========")
     print(f"目标持仓: {describe(w)}")
 
     # 读取历史日志(兼容无 mode 列的旧格式:旧脚本固定 ensemble 口径)

@@ -172,6 +172,29 @@ def apply_vol_targeting(
     return weights.mul(scale, axis=0)
 
 
+def apply_defensive_sleeve(
+    weights: pd.DataFrame,
+    closes: pd.DataFrame,
+    gold: str = "518880",
+    bond: str = "511260",
+) -> pd.DataFrame:
+    """防御 sleeve:残余现金(绝对动量滤空 + 波动目标降仓后的空档)金债各半。
+
+    经济逻辑(借鉴 eTrade 防御 sleeve 对比研究):闲置现金不产生收益,
+    路由到国债(利息 carry)+ 黄金(股票熊市对冲,2018/2022 年均为正贡献)。
+    零参数(固定 50/50),无数据依赖 → 天然无前视;引擎再 shift(1) 到 T+1 执行。
+    行权重和仍 ≤ 1(只填充空档,不加杠杆)。
+
+    回测(2017-08~2026-07,11万真实费用):年化 16.9%→18.4%、夏普 0.96→1.00、
+    回撤 -18.4% 基本不变;样本外年化 28.8%→32.2%(见 scripts/experiment_sleeve.py)。
+    """
+    w = weights.copy()
+    residual = (1.0 - w.sum(axis=1)).clip(lower=0.0)
+    w[gold] = w[gold] + residual / 2
+    w[bond] = w[bond] + residual / 2
+    return w
+
+
 # 策略注册表:名称 -> (函数, 说明)
 STRATEGIES = {
     "dual_ma": (dual_ma_signal, "双均线金叉/死叉"),

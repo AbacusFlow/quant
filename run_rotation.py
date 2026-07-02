@@ -52,10 +52,12 @@ def report_segment(equity: pd.Series, label: str) -> dict | None:
 
 
 def build_weights(closes: pd.DataFrame, mode: str, lookback: int, buffer: float,
-                  dd_control: bool, vol_control: bool = False) -> pd.DataFrame:
-    """根据模式生成目标权重(可选叠加回撤控制、波动率目标)。
+                  dd_control: bool, vol_control: bool = False,
+                  sleeve: bool = False) -> pd.DataFrame:
+    """根据模式生成目标权重(可选叠加回撤控制、波动率目标、防御 sleeve)。
 
-    叠加顺序:先回撤控制(dd_control)后波动率目标(vol_control)。
+    叠加顺序:回撤控制(dd_control)→ 波动率目标(vol_control)→ 防御 sleeve
+    (sleeve 最后:把前两层留下的现金空档路由到金/债)。
     """
     if mode == "single":
         weights = strategy.etf_momentum_rotation(closes, lookback=lookback, buffer=buffer)
@@ -67,6 +69,8 @@ def build_weights(closes: pd.DataFrame, mode: str, lookback: int, buffer: float,
     if vol_control:
         weights = strategy.apply_vol_targeting(
             weights, closes, lookback=config.VOL_TARGET_LOOKBACK)
+    if sleeve:
+        weights = strategy.apply_defensive_sleeve(weights, closes)
     return weights
 
 

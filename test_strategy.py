@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from strategy import (
+    apply_defensive_sleeve,
     apply_drawdown_control,
     apply_vol_targeting,
     etf_momentum_ensemble,
@@ -117,6 +118,51 @@ def test_vol_targeting_warmup_full():
 
     out = apply_vol_targeting(weights, closes, lookback=20)
     assert np.allclose(out["A"].values, 1.0)   # 含暖机期(realized=NaN→1)与低波动段
+
+
+def _sleeve_frame(days: int = 10) -> tuple[pd.DataFrame, pd.DataFrame]:
+    idx = pd.date_range("2024-01-01", periods=days, freq="B")
+    closes = pd.DataFrame({"A": 10.0, "G": 5.0, "B10": 100.0}, index=idx)
+    weights = pd.DataFrame({"A": 0.0, "G": 0.0, "B10": 0.0}, index=idx)
+    return weights, closes
+
+
+def test_sleeve_fills_residual_half_half():
+    """残余现金金债各半;已有持仓只增配空档部分;行权重和 == 1"""
+    weights, closes = _sleeve_frame()
+    weights["A"] = 0.4   # 主策略持 40%,空档 60%
+    out = apply_defensive_sleeve(weights, closes, gold="G", bond="B10")
+    assert np.allclose(out["A"].values, 0.4)
+    assert np.allclose(out["G"].values, 0.3)
+    assert np.allclose(out["B10"].values, 0.3)
+    assert np.allclose(out.sum(axis=1).values, 1.0)
+
+
+def test_sleeve_full_weights_unchanged():
+    """主策略已满仓(和==1)时 sleeve 不改变权重"""
+    weights, closes = _sleeve_frame()
+    weights["A"] = 1.0
+    out = apply_defensive_sleeve(weights, closes, gold="G", bond="B10")
+    assert np.allclose(out.values, weights.values)
+
+
+def test_sleeve_adds_to_existing_defensive():
+    """防御资产已被动量选中时,只在其上叠加空档份额"""
+    weights, closes = _sleeve_frame()
+    weights["G"] = 0.5   # 黄金本身是主策略持仓,空档 50%
+    out = apply_defensive_sleeve(weights, closes, gold="G", bond="B10")
+    assert np.allclose(out["G"].values, 0.75)
+    assert np.allclose(out["B10"].values, 0.25)
+    assert np.allclose(out.sum(axis=1).values, 1.0)
+
+
+def test_sleeve_no_lookahead():
+    """截断未来数据不得改变历史 sleeve 权重(50/50 无数据依赖,天然满足)"""
+    weights, closes = _sleeve_frame(days=100)
+    weights["A"] = np.where(np.arange(100) % 3 == 0, 0.5, 1.0)
+    full = apply_defensive_sleeve(weights, closes, gold="G", bond="B10")
+    part = apply_defensive_sleeve(weights.iloc[:80], closes.iloc[:80], gold="G", bond="B10")
+    assert np.allclose(full.iloc[:80].values, part.values)
 
 
 if __name__ == "__main__":

@@ -43,11 +43,13 @@ jobs:
           SIGNAL_MODE: ${{ vars.SIGNAL_MODE || 'single' }}
           SIGNAL_CAPITAL: ${{ vars.SIGNAL_CAPITAL || '10000' }}
           SIGNAL_VOL_TARGET: ${{ vars.SIGNAL_VOL_TARGET || 'false' }}
+          SIGNAL_SLEEVE: ${{ vars.SIGNAL_SLEEVE || 'false' }}
         run: |
           set -o pipefail
-          # 波动率目标开关由 repo Variable SIGNAL_VOL_TARGET 控制(true 翻开,默认 false);翻开无需改代码
+          # 波动率目标/防御sleeve 开关由 repo Variables 控制(true 翻开,默认 false);翻开无需改代码
           if [ "$SIGNAL_VOL_TARGET" = "true" ]; then VOL_FLAG="--vol-target"; else VOL_FLAG="--no-vol-target"; fi
-          python daily_signal.py --mode "$SIGNAL_MODE" --capital "$SIGNAL_CAPITAL" $VOL_FLAG | tee signal_output.txt
+          if [ "$SIGNAL_SLEEVE" = "true" ]; then SLEEVE_FLAG="--sleeve"; else SLEEVE_FLAG="--no-sleeve"; fi
+          python daily_signal.py --mode "$SIGNAL_MODE" --capital "$SIGNAL_CAPITAL" $VOL_FLAG $SLEEVE_FLAG | tee signal_output.txt
 
       - name: 昨收校验(只告警不阻断)
         id: price_check
@@ -68,10 +70,12 @@ jobs:
           SIGNAL_MODE: ${{ vars.SIGNAL_MODE || 'single' }}
           SIGNAL_CAPITAL: ${{ vars.SIGNAL_CAPITAL || '10000' }}
           SIGNAL_VOL_TARGET: ${{ vars.SIGNAL_VOL_TARGET || 'false' }}
+          SIGNAL_SLEEVE: ${{ vars.SIGNAL_SLEEVE || 'false' }}
         run: |
-          # 回撤基线须与线上策略同口径,波动率目标随线上开关一并传入
+          # 回撤基线须与线上策略同口径,波动率目标/防御sleeve 随线上开关一并传入
           if [ "$SIGNAL_VOL_TARGET" = "true" ]; then VOL_FLAG="--vol-target"; else VOL_FLAG="--no-vol-target"; fi
-          python check_risk.py --mode "$SIGNAL_MODE" --capital "$SIGNAL_CAPITAL" $VOL_FLAG > risk_check.txt 2>&1 \
+          if [ "$SIGNAL_SLEEVE" = "true" ]; then SLEEVE_FLAG="--sleeve"; else SLEEVE_FLAG="--no-sleeve"; fi
+          python check_risk.py --mode "$SIGNAL_MODE" --capital "$SIGNAL_CAPITAL" $VOL_FLAG $SLEEVE_FLAG > risk_check.txt 2>&1 \
             || echo "⚠ 回撤检查脚本启动失败(exit $?),见 CI 日志" >> risk_check.txt
           cat risk_check.txt
           if grep -q '⚠' risk_check.txt; then
@@ -162,10 +166,12 @@ jobs:
           SIGNAL_MODE: ${{ vars.SIGNAL_MODE || 'single' }}
           SIGNAL_CAPITAL: ${{ vars.SIGNAL_CAPITAL || '10000' }}
           SIGNAL_VOL_TARGET: ${{ vars.SIGNAL_VOL_TARGET || 'false' }}
+          SIGNAL_SLEEVE: ${{ vars.SIGNAL_SLEEVE || 'false' }}
         run: |
-          # 报告口径与线上信号一致(波动率目标随同一开关)
+          # 报告口径与线上信号一致(波动率目标/防御sleeve 随同一开关)
           if [ "$SIGNAL_VOL_TARGET" = "true" ]; then VOL_FLAG="--vol-target"; else VOL_FLAG="--no-vol-target"; fi
-          python report_web.py --mode "$SIGNAL_MODE" --capital "$SIGNAL_CAPITAL" $VOL_FLAG
+          if [ "$SIGNAL_SLEEVE" = "true" ]; then SLEEVE_FLAG="--sleeve"; else SLEEVE_FLAG="--no-sleeve"; fi
+          python report_web.py --mode "$SIGNAL_MODE" --capital "$SIGNAL_CAPITAL" $VOL_FLAG $SLEEVE_FLAG
 
       - uses: actions/upload-pages-artifact@v3
         with:
