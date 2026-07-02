@@ -391,6 +391,40 @@ def variants_comparison_html() -> str:
         '(收益基本不变,赚在"稳")。V2 防御 sleeve:滤空/降仓留下的闲置现金按金债各半路由'
         '(518880 黄金 + 511260 国债),零参数;年化 +1.5pp、样本外 +3.4pp,'
         '黄金在 2018/2022 股票熊年亦为正贡献。样本外 = 2022-01-01 起。</p>'
+        f'{sleeve_rules_html()}'
+    )
+
+
+def sleeve_rules_html() -> str:
+    """防御 sleeve 规则筛选子段:四种残余现金路由方式的对比与选型理由。
+
+    静态研究记录(scripts/experiment_sleeve.py);资产缺失时返回空串。
+    """
+    img_path = os.path.join(ASSETS_DIR, "compare_sleeve_rules.png")
+    if not os.path.exists(img_path):
+        return ""
+    with open(img_path, "rb") as f:
+        img = base64.b64encode(f.read()).decode()
+    return (
+        '<h3>附:sleeve 规则筛选(为什么选"金债各半")</h3>'
+        '<table><tr><th>路由规则</th><th>年化</th><th>夏普</th><th>最大回撤</th>'
+        '<th>样本外年化</th><th>样本外夏普</th></tr>'
+        '<tr><td>V1 无 sleeve(对照)</td><td>16.9%</td><td>0.96</td><td>-18.4%</td>'
+        '<td>28.8%</td><td>1.40</td></tr>'
+        '<tr><td>全债 511260</td><td>17.3%</td><td>0.97</td><td>-18.6%</td>'
+        '<td>29.3%</td><td>1.41</td></tr>'
+        '<tr><td>全金 518880</td><td>19.5%</td><td>1.00</td><td>-18.2%</td>'
+        '<td>35.1%</td><td>1.49</td></tr>'
+        '<tr><td>金债择优(20日动量)</td><td>17.8%</td><td>0.95</td><td>-18.6%</td>'
+        '<td>33.0%</td><td>1.45</td></tr>'
+        '<tr style="color:#d62728;font-weight:bold"><td>金债各半【选定】</td>'
+        '<td>18.4%</td><td>1.00</td><td>-18.4%</td><td>32.2%</td><td>1.47</td></tr></table>'
+        f'<img src="data:image/png;base64,{img}" alt="sleeve规则筛选对比">'
+        '<p class="note">选型理由:"全金"账面最好,但领先集中在 2024-25 黄金牛市'
+        '(2025 单年比 V1 多 10.8pp),有吃行情嫌疑,单押未来黄金走势;"全债"最保守'
+        '(纯利息 carry)但增益最小;"择优"引入动量参数且分年不稳(2020 落后 4.8pp)。'
+        '"金债各半"零参数、sleeve 内部自分散,黄金在 2018/2022 股票熊年为正贡献'
+        '(非纯牛市运气),夏普与全金并列最高 → 按抗过拟合原则选定。</p>'
     )
 
 
