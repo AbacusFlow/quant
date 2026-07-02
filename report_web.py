@@ -114,16 +114,28 @@ def metric_cards(title: str, m: dict) -> str:
 
 
 def build_equity_chart(equity: pd.Series, bench: pd.Series, ew: pd.Series,
-                       title: str, log_scale: bool) -> str:
+                       title: str, log_scale: bool,
+                       extras: list[tuple[str, pd.Series]] | None = None,
+                       main_label: str = "ETF动量轮动(本策略)") -> str:
+    """净值对比图;extras 为历史版本变体曲线 [(标签, 净值序列)],细虚线绘制。
+
+    最新线上策略永远是红色粗线,变体/基准用其他颜色区分。
+    """
     fig, ax = plt.subplots(figsize=(11, 5))
-    ax.plot(equity.index, equity / equity.iloc[0], label="ETF动量轮动(本策略)", linewidth=1.8, color="#d62728")
+    ax.plot(equity.index, equity / equity.iloc[0], label=main_label, linewidth=1.8, color="#d62728")
+    extra_colors = ["#999999", "#4c72b0", "#8c564b"]
+    for i, (label, series) in enumerate(extras or []):
+        s = series.dropna()
+        if len(s) >= 2:
+            ax.plot(s.index, s / s.iloc[0], label=label, linewidth=1.1,
+                    linestyle="--", color=extra_colors[i % len(extra_colors)])
     b = bench.dropna()
     ax.plot(b.index, b / b.iloc[0], label="沪深300 买入持有(不操作)", linewidth=1.3, color="#7f7f7f")
     ax.plot(ew.index, ew / ew.iloc[0], label="ETF池等权 买入持有(不操作)", linewidth=1.3, color="#1f77b4", alpha=0.8)
     if log_scale:
         ax.set_yscale("log")
     ax.set_title(title)
-    ax.legend()
+    ax.legend(fontsize=9)
     ax.grid(alpha=0.3)
     return fig_to_b64(fig)
 
@@ -363,6 +375,35 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
 ASSETS_DIR = "assets"
 
 
+def strategy_explainer_html(mode: str, vol_target: bool, sleeve: bool) -> str:
+    """页首策略说明:用大白话解释本策略是什么、各版本(V0/V1/V2)的含义。"""
+    if vol_target and sleeve:
+        live = "V2"
+    elif vol_target:
+        live = "V1"
+    elif sleeve:
+        live = "V0+防御sleeve(非标准组合)"
+    else:
+        live = "V0"
+    mode_txt = ("三个周期(15/20/25日)各自选最强、结果平均(ensemble,权重会出现 1/3、2/3 等分数)"
+                if mode == "ensemble" else "单一 20 日周期选最强、整仓切换(single)")
+    return f"""
+<h2>本策略是什么(先读我)</h2>
+<div style="background:#fff;border-radius:8px;padding:14px 18px;box-shadow:0 1px 3px rgba(0,0,0,.08);font-size:.92em;line-height:1.7">
+<p><b>核心思路(动量轮动)</b>:每天收盘后,在 9 只 ETF(沪深300/中证500/创业板/纳指/标普/恒生/黄金/国债/中证1000)里比较"过去一段时间谁涨得最多",持有最强者,次日开盘调仓;若所有候选近期都在跌,则空仓避险。当前口径:{mode_txt}。</p>
+<p><b>版本演进</b>(图表中的 V0/V1/V2,<b style="color:#d62728">红色曲线永远是当前最新版</b>):</p>
+<table>
+<tr><th>版本</th><th>做了什么</th><th>解决什么问题</th></tr>
+<tr><td>V0 基线</td><td>纯动量轮动(如上)</td><td>捕捉趋势,但大跌时回撤深(约 -25%)</td></tr>
+<tr><td>V1 +波动率目标</td><td>当组合近期波动明显高于自身历史水平时,按比例降低仓位(剩余持现金),波动回落后自动加回</td><td>动量策略的崩盘集中在高波动期 → 回撤 -25.5%→-18.4%,收益基本不变</td></tr>
+<tr><td>V2 +防御sleeve</td><td>V1 降仓/空仓留下的闲置现金,按各半买入黄金ETF+国债ETF,不再干躺</td><td>现金零收益 → 债吃利息、金对冲股票熊市,年化 +1.5pp</td></tr>
+</table>
+<p class="note">当前线上运行:<b>{live}</b>。执行规则:信号用 T 日收盘计算,T+1 日开盘成交(无未来数据);
+回测含佣金(ETF 万0.5、最低5元)、滑点、100股整手约束。下方对比基准"不操作"=期初买入后一直持有。</p>
+</div>
+"""
+
+
 def variants_comparison_html() -> str:
     """策略演进对比段:V0 基线 → V1 波动率目标 → V2 防御 sleeve(最新,红色)。
 
@@ -493,6 +534,21 @@ def main():
     result = run_portfolio_backtest(prices, weights, initial_capital=args.capital, stamp_tax=False)
     equity = result.equity
 
+    # 历史版本变体曲线(近一年图用):仅当线上开了覆盖层才有对比意义
+    variant_extras = []
+    if args.vol_target or args.sleeve:
+        w_v0 = build_weights(closes, mode=args.mode, lookback=config.ROTATION_LOOKBACK,
+                             buffer=config.ROTATION_BUFFER, dd_control=False)
+        eq_v0 = run_portfolio_backtest(prices, w_v0, initial_capital=args.capital,
+                                       stamp_tax=False).equity
+        variant_extras.append(("V0 基线(无覆盖层)", eq_v0))
+    if args.vol_target and args.sleeve:
+        w_v1 = build_weights(closes, mode=args.mode, lookback=config.ROTATION_LOOKBACK,
+                             buffer=config.ROTATION_BUFFER, dd_control=False, vol_control=True)
+        eq_v1 = run_portfolio_backtest(prices, w_v1, initial_capital=args.capital,
+                                       stamp_tax=False).equity
+        variant_extras.append(("V1 +波动率目标", eq_v1))
+
     benchmark = data.get_benchmark_daily(config.ROTATION_START, args.end)
     bench = benchmark["close"].reindex(equity.index).ffill()
     # ETF池等权持有(各标的归一后均值)
@@ -513,8 +569,19 @@ def main():
                                   f"全区间净值对比({equity.index[0].date()} ~ {equity.index[-1].date()},对数坐标)",
                                   log_scale=True)
     one_year = equity.index[-1] - pd.Timedelta(days=365)
+    if args.vol_target and args.sleeve:
+        main_label_1y = "V2 本策略(波动目标+防御sleeve)【最新】"
+    elif args.vol_target:
+        main_label_1y = "V1 本策略(+波动率目标)【最新】"
+    elif args.sleeve:
+        main_label_1y = "本策略(+防御sleeve)【最新】"
+    else:
+        main_label_1y = "ETF动量轮动(本策略)"
     img_1y = build_equity_chart(equity.loc[one_year:], bench.loc[one_year:], ew.loc[one_year:],
-                                "近一年净值对比", log_scale=False)
+                                "近一年净值对比(含历史版本变体)" if variant_extras else "近一年净值对比",
+                                log_scale=False,
+                                extras=[(lb, s.loc[one_year:]) for lb, s in variant_extras],
+                                main_label=main_label_1y)
 
     # 操作明细(近一年)
     segs = holding_segments(weights, equity, bench, ew)
@@ -594,6 +661,8 @@ img {{ max-width: 100%; background: #fff; border-radius: 6px; box-shadow: 0 1px 
 <body>
 <h1>ETF 动量轮动 — 模拟盘报告</h1>
 <p class="note">更新于 {now}(数据截至 {signal_date})· mode={args.mode} · 本金 {args.capital:,.0f} 元 · 回测含佣金/滑点/整手约束 · A股红涨绿跌</p>
+
+{strategy_explainer_html(args.mode, args.vol_target, args.sleeve)}
 
 {real_account_html(closes, equity, bench, ew)}
 
