@@ -353,17 +353,24 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
 
     real_ret = navs.iloc[-1] - 1  # 份额化(TWR)收益,不受入金/出金时点影响
     sim_ret = sim.iloc[-1] / sim.iloc[0] - 1 if len(sim) >= 2 else float("nan")
+    abs_pnl = float(real_eq.iloc[-1]) - net_deposit  # 绝对盈亏 = 口袋里的钱
+    abs_ret = abs_pnl / net_deposit if net_deposit > 0 else float("nan")
     cards = (f'<div class="cards">'
+             f'<div class="card"><div class="card-label">绝对盈亏(总资产-净入金)</div>'
+             f'<div class="card-value {color_cls(abs_pnl)}">{abs_pnl:+,.0f} 元({pct(abs_ret)})</div></div>'
+             f'<div class="card"><div class="card-label">当前总资产</div>'
+             f'<div class="card-value">{real_eq.iloc[-1]:,.0f} 元</div></div>'
+             f'<div class="card"><div class="card-label">累计净入金</div>'
+             f'<div class="card-value">{net_deposit:,.0f} 元</div></div>'
              f'<div class="card"><div class="card-label">实盘累计收益(份额化)</div>'
              f'<div class="card-value {color_cls(real_ret)}">{pct(real_ret)}</div></div>'
              f'<div class="card"><div class="card-label">同期模拟盘</div>'
              f'<div class="card-value {color_cls(sim_ret)}">{pct(sim_ret)}</div></div>'
              f'<div class="card"><div class="card-label">执行偏差(实盘-模拟)</div>'
-             f'<div class="card-value {color_cls(real_ret - sim_ret)}">{pct(real_ret - sim_ret)}</div></div>'
-             f'<div class="card"><div class="card-label">当前总资产</div>'
-             f'<div class="card-value">{real_eq.iloc[-1]:,.0f} 元</div></div>'
-             f'<div class="card"><div class="card-label">累计净入金</div>'
-             f'<div class="card-value">{net_deposit:,.0f} 元</div></div></div>')
+             f'<div class="card-value {color_cls(real_ret - sim_ret)}">{pct(real_ret - sim_ret)}</div></div></div>'
+             f'<p class="note">「绝对盈亏」= 你实际赚/亏的钱(简单差额,大额入金晚到则早期涨幅贡献小);'
+             f'「份额化收益」= 策略每份资金的历史表现(入金时点不影响),用于与模拟盘/基准公平对比。'
+             f'两者可能一正一负,都是对的,回答的问题不同。</p>')
 
     return (f'<h2>实盘 vs 模拟</h2>{cards}'
             f'<img src="data:image/png;base64,{img}" alt="实盘净值">'
