@@ -188,9 +188,15 @@ def load_executions() -> pd.DataFrame | None:
 def real_equity_series(execs: pd.DataFrame, closes: pd.DataFrame) -> tuple[pd.Series, pd.Series, float]:
     """根据成交流水重建真实账户。返回 (每日总资产, 份额化净值 NAV, 累计净入金)。
 
-    NAV 采用份额化(TWR)口径(标准基金记账):当日收盘 NAV 先剔除当日净流入
-    计算,再按该 NAV 折算份额增减。追加/抽回资金不扭曲历史收益曲线,
-    可与模拟盘/基准直接比较。
+    NAV 采用份额化(TWR)口径(标准基金记账):入金/出金按"日初"折算份额
+    (用前一日 NAV 计价),使新资本与既有份额一起承担当日涨跌,再按当日收盘
+    总资产 eq/units 计 NAV。追加/抽回资金不扭曲历史收益曲线,可与模拟盘/基准
+    直接比较。
+
+    为何按日初而非日终:实盘现金往往当日开盘即部署为持仓、按收盘计价;若按
+    日终"剔除净流入"折份额(nav=(eq-flow)/units),会把这笔新钱盘中 open→close
+    的涨跌错记到既有份额上,虚增净值(如大额加仓当天所持标的其实几乎没动,
+    净值却跳涨)。日初口径下,当日收益由新老份额按比例分摊,无此错配。
     """
     last_quote = closes.index[-1]
     future = execs[execs["date"] > last_quote]
@@ -211,7 +217,7 @@ def real_equity_series(execs: pd.DataFrame, closes: pd.DataFrame) -> tuple[pd.Se
     navs = pd.Series(dtype=float)
     for day in days:
         todo = execs.index[(~applied) & (execs["date"] <= day)]
-        flow_today = 0.0  # 当日净流入,日终按剔除流入后的 NAV 折份额
+        flow_today = 0.0  # 当日净流入,按日初(前一日 NAV)折份额
         for i in todo:
             r = execs.loc[i]
             if r["action"] == "deposit":
@@ -241,12 +247,14 @@ def real_equity_series(execs: pd.DataFrame, closes: pd.DataFrame) -> tuple[pd.Se
             applied[i] = True
         eq = cash + sum(n * float(closes.at[day, s]) for s, n in pos.items() if n)
         equity.at[day] = eq
-        if units > 1e-9:
-            nav = (eq - flow_today) / units  # 当日收益归属于既有份额
+        # 入金/出金按日初折份额:此处 nav 仍为前一日 NAV(首日为 1.0),新资本
+        # 据此计价并入份额,随后与既有份额一起承担当日涨跌 → 无盘中错配虚增。
         if flow_today != 0.0:
             units += flow_today / nav
             if units < -1e-9:
                 raise ValueError(f"{day.date()} 出金超过账户份额,请检查流水")
+        if units > 1e-9:
+            nav = eq / units  # 当日收益由新老份额按比例分摊
         navs.at[day] = nav
     return equity, navs, net_deposit
 
