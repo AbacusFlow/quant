@@ -15,6 +15,7 @@ import base64
 import datetime as dt
 import html
 import io
+import math
 import os
 
 import matplotlib
@@ -379,6 +380,137 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
             f'{guide}')
 
 
+def replay_positions(confirmed: pd.DataFrame) -> tuple[dict[str, int], float]:
+    """回放已成交流水,返回 (最终持仓 {symbol: shares(!=0)}, 现金余额)。
+
+    口径与 real_equity_series 的账本回放严格一致:买入现金减 amount(缺则
+    gross+费),卖出现金加 amount(缺则 gross-费),入金/出金直接加减现金,
+    并沿用同款负现金/负持仓校验(异常流水抛 ValueError,交由上层吞掉)。
+    仅用于展示当前持仓与策略目标的对照,不做净值折份额。
+    """
+    cash = 0.0
+    pos: dict[str, int] = {}
+    for _, r in confirmed.iterrows():
+        if r["action"] == "deposit":
+            cash += float(r["amount"])
+        elif r["action"] == "withdraw":
+            cash -= float(r["amount"])
+            if cash < -0.01:
+                raise ValueError(f"{r['date'].date()} 出金后现金为负,请检查流水")
+        else:
+            gross = float(r["price"]) * int(r["shares"])
+            fee_default = max(gross * config.ETF_COMMISSION_RATE, config.COMMISSION_MIN)
+            if r["action"] == "buy":
+                cost = float(r["amount"]) if pd.notna(r["amount"]) else gross + fee_default
+                cash -= cost
+                pos[r["symbol"]] = pos.get(r["symbol"], 0) + int(r["shares"])
+                if cash < -0.01:
+                    raise ValueError(f"{r['date'].date()} 买入 {r['symbol']} 后现金为负,请检查流水")
+            else:
+                proceeds = float(r["amount"]) if pd.notna(r["amount"]) else gross - fee_default
+                cash += proceeds
+                pos[r["symbol"]] = pos.get(r["symbol"], 0) - int(r["shares"])
+                if pos[r["symbol"]] < 0:
+                    raise ValueError(f"{r['date'].date()} 卖出 {r['symbol']} 后持仓为负,请检查流水")
+    return {s: n for s, n in pos.items() if n}, cash
+
+
+def holdings_vs_target_html(closes: pd.DataFrame, weights: pd.DataFrame) -> str:
+    """实际持仓 vs 策略目标对照 + 参考调整建议。
+
+    实际持仓来自 executions.csv 已成交流水回放;策略目标为最新信号权重
+    (与页面「最新信号」横幅同口径:当前线上 mode/vol-target/sleeve)。
+    用户已选择维持现状,此段仅作提醒,不代表必须调仓。任何解析/回放/取价
+    异常都返回空串,绝不中断整页生成(与其他 *_html 容错约定一致)。
+    """
+    try:
+        execs = load_executions()
+        if execs is None:
+            return ""
+        confirmed = execs[execs["status"] != "计划"]
+        if confirmed.empty or closes.empty or weights.empty:
+            return ""
+        # 流水日期晚于最新行情 → 无法用当日收盘可靠计价(同 real_equity_series 口径),返回空串
+        if (confirmed["date"] > closes.index[-1]).any():
+            return ""
+        pos, cash = replay_positions(confirmed)
+
+        last = closes.iloc[-1]
+        target = weights.iloc[-1]
+
+        def finite(x) -> bool:
+            try:
+                return pd.notna(x) and math.isfinite(float(x))
+            except (TypeError, ValueError):
+                return False
+
+        def price_of(s: str) -> float:
+            if s in last.index and finite(last[s]):
+                return float(last[s])
+            return float("nan")
+
+        # 任何非零持仓拿不到有限正价格 → 无法可靠计价,整段返回空串(不静默低估总资产)
+        prices = {s: price_of(s) for s in pos}
+        if any(not finite(px) or px <= 0 for px in prices.values()):
+            return ""
+
+        etf_value = sum(n * prices[s] for s, n in pos.items())
+        total = etf_value + cash
+        if not finite(total) or total <= 0:
+            return ""
+
+        # 100 股整手:对"调整量"本身向最近整手四舍五入(半手向上,避免银行家舍入),
+        # 从而即便实际持仓非整手,给出的买/卖建议也一定是整手
+        def round_lot(x: float) -> int:
+            sign = 1 if x >= 0 else -1
+            return sign * int(math.floor(abs(x) / 100 + 0.5) * 100)
+
+        symbols = sorted(
+            set(pos) | {s for s, w in target.items() if finite(w) and float(w) > 0.005},
+            key=lambda s: -(float(target[s]) if s in target.index and finite(target[s]) else 0.0),
+        )
+
+        rows = ""
+        for s in symbols:
+            name = config.ETF_POOL.get(s, "(池外)")
+            px = price_of(s)
+            shares = pos.get(s, 0)
+            tgt_pct = float(target[s]) if s in target.index and finite(target[s]) else 0.0
+            if finite(px) and px > 0:
+                value = shares * px
+                actual_pct = value / total
+                dev = actual_pct - tgt_pct
+                value_s = f"{value:,.0f} 元"
+                actual_s = pct(actual_pct, signed=False)
+                dev_s = pct(dev)
+                delta = round_lot(tgt_pct * total / px - shares)  # 目标股数 - 实际股数,整手
+                if abs(delta) < 100:
+                    adj = "维持"
+                elif delta > 0:
+                    adj = f"买入约 {delta:,} 股"
+                else:
+                    adj = f"卖出约 {-delta:,} 股"
+            else:
+                value_s = actual_s = dev_s = "-"
+                adj = "无行情,暂无法计算"
+            rows += (f'<tr><td>{html.escape(str(s))} {html.escape(str(name))}</td>'
+                     f'<td>{shares:,} 股</td><td>{value_s}</td><td>{actual_s}</td>'
+                     f'<td>{pct(tgt_pct, signed=False)}</td><td>{dev_s}</td><td>{adj}</td></tr>')
+        if cash > 0.5:
+            rows += (f'<tr><td>现金</td><td>-</td><td>{cash:,.0f} 元</td>'
+                     f'<td>{pct(cash / total, signed=False)}</td><td>-</td><td>-</td><td>-</td></tr>')
+
+        return (f'<h2>实际持仓 vs 策略目标(据此决定是否手动调仓)</h2>'
+                f'<p class="note">「实际持仓」来自已成交流水,「策略目标」为最新信号权重'
+                f'(当前线上口径)。你已选择<b>维持现状</b>,下表仅作提醒:若要对齐策略,'
+                f'可参考「参考调整」列手动下单(T+1 开盘、100 股整手;偏离在 2% 总资产以内可忽略)。'
+                f'总资产 {total:,.0f} 元。</p>'
+                f'<table><tr><th>标的</th><th>实际持仓</th><th>实际市值</th><th>实际占比</th>'
+                f'<th>策略目标占比</th><th>偏离</th><th>参考调整</th></tr>{rows}</table>')
+    except Exception:
+        return ""
+
+
 ASSETS_DIR = "assets"
 
 
@@ -672,6 +804,8 @@ img {{ max-width: 100%; background: #fff; border-radius: 6px; box-shadow: 0 1px 
 {strategy_explainer_html(args.mode, args.vol_target, args.sleeve)}
 
 {real_account_html(closes, equity, bench, ew)}
+
+{holdings_vs_target_html(closes, weights)}
 
 <div class="banner">
   <div class="big">最新信号:{html.escape(latest)}</div>
