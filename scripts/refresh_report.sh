@@ -18,6 +18,14 @@ export PATH="/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:
 # 离线/无凭据时 git 不弹交互,直接失败返回(配合 timeout 防持锁挂死)
 export GIT_TERMINAL_PROMPT=0
 
+# 由 post-commit 钩子后台拉起时,会继承 git 为钩子导出的 GIT_DIR/GIT_INDEX_FILE 等
+# 本地仓库环境变量;它们指向主仓索引,会让本脚本内的 `git worktree add` 误把 .git/index
+# 当路径打开而报 "index file open failed: Not a directory",导致每次钩子触发都必失败。
+# 用 git 自己的权威清单 `git rev-parse --local-env-vars`(随 git 版本自适应,避免手写漏项)
+# 清空全部继承变量,让脚本内的 git 命令按 cwd 正常解析仓库(手动运行时它们本就不存在)。
+# 该清单是静态名单、无需身处仓库即可输出;git 缺失时 unset 无参数为无害空操作。
+unset $(git rev-parse --local-env-vars 2>/dev/null) 2>/dev/null || true
+
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR" || exit 0
 
