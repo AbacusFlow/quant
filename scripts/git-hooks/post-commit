@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# post-commit:有新提交且涉及"账本/策略/报告"相关文件时,后台重建静态报告并推送,
+# 保持 GitHub Pages(https://abacusflow.github.io/quant/)与最新提交同步。
+# 通过 git config core.hooksPath=scripts/git-hooks 生效(见 README/记忆)。
+set -uo pipefail
+
+# 递归护栏:refresh_report.sh 自身提交 docs 时带此环境变量,避免无限重建
+[ -n "${REFRESH_REPORT_RUNNING:-}" ] && exit 0
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+
+# 只在报告口径相关文件变化时刷新;纯文档/脚本提交跳过(省去无谓的重建)。
+# 覆盖 report_web 的全部依赖:数据账本 + 它 import 的模块 + 内嵌的 assets/ 图。
+RELEVANT='^(output/(signal_log|executions)\.csv|report_web\.py|config\.py|strategy\.py|run_rotation\.py|portfolio\.py|data\.py|metrics\.py|assets/.*)$'
+if ! git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null | grep -qE "$RELEVANT"; then
+    exit 0
+fi
+
+# 后台跑,绝不阻塞当前提交;setsid 脱离父进程,失败也不影响提交
+if [ -x "$ROOT/scripts/refresh_report.sh" ]; then
+    setsid "$ROOT/scripts/refresh_report.sh" >/dev/null 2>&1 < /dev/null &
+fi
+exit 0
