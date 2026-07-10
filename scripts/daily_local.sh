@@ -10,9 +10,13 @@
 #   5. 本地 git 提交信号日志与流水(路径受限、只提交这两文件;无远端,不 push)
 #   6. Telegram spool 推送(成功才出队,失败留待下次;交易日有信号行即推每日提醒,或有告警才推)
 #
-# cron(交易日每天早 8 点一次,机器 TZ=Asia/Hong_Kong;开盘前拿到昨收信号+持仓简况):
-#   3 8 * * 1-5  /home/logan/Projects/quant/scripts/daily_local.sh
-# 交易日每天推一条消息(含信号/持仓偏离/账户简况/报告链接);非交易日 daily_signal 无信号行→不推。
+# 双档 cron(机器 TZ=Asia/Hong_Kong):
+#   早 8 点档(本脚本)——只讲今日操作(调仓指令 / 今日无需调仓),用昨收信号:
+#     3 8 * * 1-5  /home/logan/Projects/quant/scripts/daily_local.sh
+#   收盘后档(scripts/postclose_local.sh,17:03)——账户小结 + 持仓偏离,用妙想当日收盘兜底:
+#     3 17 * * 1-5  /home/logan/Projects/quant/scripts/postclose_local.sh
+# 本脚本每交易日推一条精简操作提醒(信号/调仓指令/告警/报告链接);账户盈亏交给收盘后档。
+# 非交易日 daily_signal 无信号行→不推。
 set -uo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -220,13 +224,11 @@ supersede_stale_signals   # 无论走哪个分支,先淘汰被最新键取代的
 # 休市日/无新信号但仍有滞留键控档需重试的情形,交给下方 else 分支 reconcile+flush 补发。
 if [ -n "$LATEST_KEY" ] && [ ! -f "$RECEIPT_DIR/$LATEST_SAFE" ] && [ -n "$SIGNAL_LINE" ]; then
     if echo "$SIGNAL_OUT" | grep -qE "买入|卖出"; then
-        # 调仓日:信号变化 → 展示调仓指令(权威操作);账户简况只带一行,不再列持仓偏离
-        # (避免"调仓指令"与"持仓偏离"给出两套买卖股数造成困惑,Codex 审查项/防杂乱)
+        # 调仓日:信号变化 → 只讲今日操作(权威调仓指令)。账户小结/持仓偏离交给收盘后档
+        # (postclose_local.sh,17:03),早 8 点档不再重复账户信息,避免一天两次混杂。
         ORDERS=$(echo "$SIGNAL_OUT" | grep -E "买入|卖出")
         # 执行日措辞由 daily_signal.py 给出(今日/具体日期),不在此硬编码
         HEADER=$(echo "$SIGNAL_OUT" | grep "调仓指令" | head -1 | sed 's/^-*[[:space:]]*//; s/[[:space:]]*-*$//')
-        STATUS_BLOCK=$("${DOCKER_RUN[@]}" portfolio_status.py --mode "$MODE" --capital "$CAPITAL" \
-            "$VOL_FLAG" "$SLEEVE_FLAG" --account-only 2>>"$RUN_LOG" || true)
         TEXT="【ETF量化】开盘需调仓
 ━━━━━━━━━━━━
 $SIGNAL_LINE
@@ -236,17 +238,13 @@ $ORDERS
 
 ⚠ 请按6位证券代码下单,成交前核对代码一致(同指数基金名称相近,勿凭名称选)"
     else
-        # 无信号变化(含 commit 后漏推的自愈补推):展示持仓偏离(>5pp 才列)+ 账户简况,
-        # 给用户可执行的漂移纠正建议(自愈补推时原调仓指令因幂等已不复现,持仓偏离同样可操作)
-        STATUS_BLOCK=$("${DOCKER_RUN[@]}" portfolio_status.py --mode "$MODE" --capital "$CAPITAL" \
-            "$VOL_FLAG" "$SLEEVE_FLAG" 2>>"$RUN_LOG" || true)
+        # 无信号变化:只提示今日无需调仓。账户小结/持仓偏离交给收盘后档,早 8 点档保持精简。
         TEXT="【ETF量化】每日提醒
 ━━━━━━━━━━━━
-$SIGNAL_LINE"
-    fi
-    [ -n "$STATUS_BLOCK" ] && TEXT="$TEXT
+$SIGNAL_LINE
 
-$STATUS_BLOCK"
+今日无需调仓,维持现有持仓"
+    fi
     [ -n "$ALERTS" ] && TEXT="$TEXT
 
 $ALERTS"

@@ -53,6 +53,15 @@ data.py → strategy.py → backtest.py (single-asset)  → metrics.py / report.
 - **metrics.py** — total/annualized return, Sharpe (252 trading days), max drawdown, win rate per completed buy→sell round.
 - **report.py** — prints metrics, saves `output/equity_curve.png` (strategy vs. normalized benchmark) and `output/trades.csv`. Uses matplotlib `Agg` backend with CJK fonts configured for Chinese labels.
 - **config.py** — all defaults: symbol, date range, MA periods, initial capital (1M CNY), fee rates, `data/` and `output/` paths.
+- **portfolio_status.py** — builds the「持仓偏离目标 + 账户简况」text block for daily Telegram messages (same 口径 as check_risk: load_pool→closes→build_weights→real_equity_series+replay_positions). Any error/未就绪→空串,不中断。Optional `--mx-fallback PATH`: for the收盘后档 only, appends the妙想(mx_data)当日收盘 as the latest in-memory bar so the same-day account block renders before akshare's ~22:00 K-line publish. See「双档 cron + mx_data 兜底」below.
+- **scripts/mx_fetch_latest.py** (host-only) + **scripts/postclose_local.sh** (host, 17:03 cron) — the收盘后展示档: mx_data fetch runs on host (needs `MX_APIKEY`+network), pandas/status runs in Docker. Isolated flock/spool/receipt from daily_local. Money signal path (daily_signal/check_risk/8点档) NEVER touches mx_data.
+
+## 双档 cron + mx_data 收盘后兜底(仅展示,money 路径不用)
+
+- **早 8 点档** (`scripts/daily_local.sh`, `3 8 * * 1-5`): only今日操作 — 调仓指令 or「今日无需调仓,维持现有持仓」, using 昨收 akshare signal. No account/pnl block (moved to 收盘后档).
+- **收盘后档** (`scripts/postclose_local.sh`, `3 17 * * 1-5`): 账户小结 + 持仓偏离, Telegram-only (网页仍走晚间 akshare + post-commit auto-refresh, no mx). Uses `mx_fetch_latest.py` → `output/mx_latest.json` → `portfolio_status.py --mx-fallback`.
+- **mx_data 硬约束** (门槛验证 2026-07-10): 近端最新收盘逐位匹配 akshare qfq, but 历史分红标的复权口径发散 (mx AdjustFlag=3 因子法 ≠ akshare 锚定最新). 故只**追加 `end` 当日一根 bar** (o/h/l=close, volume=0, only when `end` > 现有最新 bar), **绝不拉全历史、绝不写 `data/*.csv`**. Partial fill degrades naturally (align_prices 交集截回上一交易日). mx JSON missing/corrupt → 静默降级回 akshare.
+- `MX_APIKEY` is a `.env` whitelist key (gitignored), read by postclose_local's `envval`; never passed into Docker.
 
 ## Key Conventions
 

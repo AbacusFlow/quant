@@ -16,7 +16,9 @@ import argparse
 import contextlib
 import datetime as dt
 import io
+import json
 import math
+import os
 import sys
 import traceback
 from zoneinfo import ZoneInfo
@@ -45,9 +47,56 @@ def _finite(x) -> bool:
         return False
 
 
+def _apply_mx_fallback(prices: dict, path: str) -> pd.Timestamp | None:
+    """收盘后档专用:把妙想(mx_data)当日收盘**追加为最新一根 bar**,in-memory 补齐同日行情。
+
+    仅用于展示档(账户小结/持仓偏离);money 信号路径永不调用。硬约束:
+    - 只追加 `end` 当日一根 bar(o/h/l=close,volume=0),`end` 必须严格晚于现有最新 bar;
+    - 绝不写磁盘缓存(防「名新实旧」堵住 akshare 后续权威拉取);
+    - 只补池内已加载的标的;JSON 缺失/损坏/字段缺 → 静默忽略,优雅降级回 akshare。
+    部分填充自然降级:若非全部标的补到 end,closes_table 的 align_prices 交集会截回上一交易日;
+    调用方据返回的 mx end 与实际最新交易日比对,不一致则弃用(避免用旧价冒充 mx 日期)。
+
+    返回:成功解析并尝试追加时返回 mx 的 end(pd.Timestamp);无 JSON/损坏/字段缺返回 None。
+    """
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+        end = payload.get("end")
+        closes = payload.get("closes")
+        if not end or not isinstance(closes, dict):
+            return None
+        ts = pd.Timestamp(end)
+        if pd.isna(ts):
+            return None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+    for sym, df in prices.items():
+        if sym not in closes:
+            continue
+        try:
+            px = float(closes[sym])
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(px) or px <= 0:
+            continue
+        if df is None or df.empty or ts <= df.index[-1]:
+            continue  # 只在严格更新时追加;akshare 已出当日 bar 则不动
+        row = pd.DataFrame(
+            {"open": [px], "high": [px], "low": [px], "close": [px], "volume": [0.0]},
+            index=pd.DatetimeIndex([ts], name=df.index.name),
+        )
+        prices[sym] = pd.concat([df, row])
+    return ts
+
+
 def build_status_block(mode: str, vol_control: bool, sleeve: bool,
                        dev_threshold: float = DEV_THRESHOLD,
-                       include_dev: bool = True) -> str:
+                       include_dev: bool = True,
+                       mx_fallback_path: str | None = None) -> str:
     execs = load_executions()
     confirmed = execs[execs["status"] != "计划"] if execs is not None else pd.DataFrame()
     if confirmed.empty:
@@ -58,24 +107,38 @@ def build_status_block(mode: str, vol_control: bool, sleeve: bool,
 
     # 数据拉取会往 stdout 打「拉取 …」;吞掉,只留最终文本块
     with contextlib.redirect_stdout(io.StringIO()):
-        prices = load_pool(config.ROTATION_START, end)
+        # 纯展示路径:write_cache=False,绝不落盘(end=today 但数据源只到昨天时,写
+        # `{name}_..._{today}.csv` 会以文件名命中堵住后续 akshare 权威拉取——见 data.py)
+        prices = load_pool(config.ROTATION_START, end, write_cache=False)
+        # 收盘后档:若有妙想当日收盘 JSON,追加为最新一根 bar(in-memory,不落盘)
+        mx_end = _apply_mx_fallback(prices, mx_fallback_path)
         closes = closes_table(prices).loc[:end]
         if closes.empty or confirmed["date"].max() > closes.index[-1]:
             return ""  # 行情未更新(晚于最新收盘)则不展示,避免错配
+        # mx 部分覆盖时 align_prices 交集会把实际日期截回上一交易日,但调用方(postclose)
+        # 仍以 mx 的 end 作 KEY/回执 → 会用旧价冒充 mx 日期。故要求实际最新日==mx end 才展示。
+        if mx_end is not None and closes.index[-1] != mx_end:
+            return ""
         weights = build_weights(closes, mode=mode, lookback=config.ROTATION_LOOKBACK,
                                 buffer=config.ROTATION_BUFFER, dd_control=False,
                                 vol_control=vol_control, sleeve=sleeve)
+        pos, cash = replay_positions(confirmed)
+        held = {s for s, sh in pos.items() if sh}  # 当前仍持有(非零)的标的
         # 池外标的(如误买错代码后的持有)按需补收盘价,口径同 check_risk
         extra = sorted(set(confirmed.loc[confirmed["action"].isin(("buy", "sell")), "symbol"])
                        - set(closes.columns))
         if extra:
             closes = closes.copy()
             for s in extra:
-                px = data.get_etf_daily(s, config.ROTATION_START, end)["close"]
+                px = data.get_etf_daily(s, config.ROTATION_START, end, write_cache=False)["close"]
+                # mx 兜底日:仍持有的池外标的必须有 mx_end 当日**真实**收盘,否则 ffill 会用旧价
+                # 冒充 mx 日期(账户市值/盈亏含旧价却标 mx 日)→ 弃用整块。已清仓的池外历史标的
+                # (pos=0,如误买后卖光的 513300)不参与当前计价,不触发弃用,避免误伤正常展示。
+                if mx_end is not None and s in held and mx_end not in px.index:
+                    return ""
                 closes[s] = px.reindex(closes.index).ffill()
         equity, navs, net_deposit = real_equity_series(confirmed, closes)
 
-    pos, cash = replay_positions(confirmed)
     last = closes.iloc[-1]
     total = float(equity.iloc[-1])
     if not _finite(total) or total <= 0:
@@ -127,10 +190,13 @@ def main() -> int:
                    default=config.SLEEVE_ENABLED, help="须与线上策略同口径")
     p.add_argument("--account-only", action="store_true",
                    help="只输出账户简况行,不列持仓偏离(调仓日用,避免与调仓指令重复)")
+    p.add_argument("--mx-fallback", default=None,
+                   help="收盘后档:妙想当日收盘 JSON 路径,追加为最新一根 bar(in-memory,不落盘)")
     args = p.parse_args()
     try:
         block = build_status_block(args.mode, vol_control=args.vol_target, sleeve=args.sleeve,
-                                   include_dev=not args.account_only)
+                                   include_dev=not args.account_only,
+                                   mx_fallback_path=args.mx_fallback)
     except Exception as e:
         # 每日主流程不因本块出错而中断:仍返回空块(stdout),但把异常写 stderr 供 cron 日志留痕,
         # 避免数据口径错误/CSV 损坏/代码回归长期无声消失(daily_local.sh 会把 stderr 收进 cron_signal.log)

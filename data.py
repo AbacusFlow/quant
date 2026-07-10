@@ -115,10 +115,14 @@ def _fetch_etf_tencent(symbol: str, start: str, end: str) -> pd.DataFrame:
     return df[["date", "open", "high", "low", "close", "volume"]]
 
 
-def get_etf_daily(symbol: str, start: str, end: str) -> pd.DataFrame:
+def get_etf_daily(symbol: str, start: str, end: str, write_cache: bool = True) -> pd.DataFrame:
     """场内 ETF 日线前复权数据,列: open/high/low/close/volume,索引为日期。
 
     数据源优先级:东财(qfq)→ 腾讯(qfq)→ 新浪(不复权,独立缓存键)。
+
+    write_cache=False:只读缓存、绝不落盘(供纯展示/兜底路径用,避免写「名新实旧」缓存
+    ——当日盘后 end=today 但数据源只到昨天时,写 `{name}_..._{today}.csv` 会以文件名命中
+    堵住后续 akshare 权威拉取)。
     """
     path = _cache_path(f"etf_{symbol}", start, end)
     cached = _load_cache(path)
@@ -169,8 +173,9 @@ def get_etf_daily(symbol: str, start: str, end: str) -> pd.DataFrame:
     if df.empty:
         raise RuntimeError(f"ETF {symbol} 在 {start} ~ {end} 区间内无数据")
 
-    os.makedirs(config.DATA_DIR, exist_ok=True)
-    df.to_csv(path)
+    if write_cache:
+        os.makedirs(config.DATA_DIR, exist_ok=True)
+        df.to_csv(path)
     return df
 
 

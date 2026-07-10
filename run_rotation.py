@@ -26,11 +26,11 @@ plt.rcParams["font.sans-serif"] = ["Noto Sans CJK SC", "Noto Sans CJK JP", "SimH
 plt.rcParams["axes.unicode_minus"] = False
 
 
-def load_pool(start: str, end: str) -> dict[str, pd.DataFrame]:
+def load_pool(start: str, end: str, write_cache: bool = True) -> dict[str, pd.DataFrame]:
     prices = {}
     for symbol, name in config.ETF_POOL.items():
         print(f"拉取 {name}({symbol}) ...")
-        prices[symbol] = data.get_etf_daily(symbol, start, end)
+        prices[symbol] = data.get_etf_daily(symbol, start, end, write_cache=write_cache)
     return prices
 
 
