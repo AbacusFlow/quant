@@ -38,6 +38,7 @@ from report_web import ACTION_ALIASES, EXEC_PATH, load_executions, replay_positi
 CN = {"buy": "买入", "sell": "卖出", "deposit": "入金", "withdraw": "出金"}
 HEADER = "date,action,symbol,price,shares,amount,note,status"
 LOCK_PATH = os.path.join(config.OUTPUT_DIR, ".daily_local.lock")  # 与 daily_local.sh 同一把锁
+LEDGER_LOCK = os.path.join(config.OUTPUT_DIR, ".ledger.lock")  # 账本层锁:与 daily_signal 写账本互斥
 
 
 def _fmt_shares(pos: dict, cash: float) -> str:
@@ -241,11 +242,16 @@ def main() -> int:
                 "amount": float(amount), "note": note, "status": "已成交"}
     raw_line = _row_csv(cells)
 
-    # 全流程持锁:读→内存校验→原子写→重解析校验,与 daily_local.sh 串行,避免并发覆盖
+    # 全流程持双锁:读→内存校验→原子写→重解析校验期间串行。
+    # 锁次序约定(防死锁):.daily_local.lock(编排层,先)→ .ledger.lock(账本层,后)。
+    # 编排锁挡住 daily_local.sh 整条流水线;账本锁挡住手动直跑的 daily_signal.py
+    # (其 write_planned 整表重写,若无此锁会覆盖丢掉本脚本刚追加的成交行)。
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
     lock_fd = os.open(LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o644)
+    ledger_fd = os.open(LEDGER_LOCK, os.O_CREAT | os.O_RDWR, 0o644)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        fcntl.flock(ledger_fd, fcntl.LOCK_EX)
 
         # 业务幂等:拒绝与已有「已成交」行完全相同的记录(防手滑/重跑重复记账,尤重入金)
         existing = load_executions()
@@ -304,7 +310,9 @@ def main() -> int:
             print("提示: 加 --commit 可直接提交并触发报告刷新")
         return 0
     finally:
+        fcntl.flock(ledger_fd, fcntl.LOCK_UN)
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(ledger_fd)
         os.close(lock_fd)
 
 

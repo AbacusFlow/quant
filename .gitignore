@@ -7,3 +7,6 @@ output/*
 site/
 .DS_Store
 .env
+# 本机会话/状态与笔记,公开仓库绝不提交
+.omc/
+cf5.md

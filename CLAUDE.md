@@ -27,8 +27,11 @@ docker run --rm -v "$PWD":/work quant python daily_signal.py
 docker run --rm -v "$PWD":/work quant python main.py --symbol 600519
 
 # Unit tests
-docker run --rm -v "$PWD":/work quant python test_portfolio.py   # portfolio engine
-docker run --rm -v "$PWD":/work quant python test_strategy.py    # rotation/ensemble/drawdown control
+docker run --rm -v "$PWD":/work quant python test_portfolio.py     # portfolio engine
+docker run --rm -v "$PWD":/work quant python test_strategy.py      # rotation/ensemble/drawdown control
+docker run --rm -v "$PWD":/work quant python test_data.py          # cache-poison guard / tencent paging / qfq_only(离线伪造数据源)
+docker run --rm -v "$PWD":/work quant python test_ledger.py        # 账本现金流规则 + account_equity fail-closed
+docker run --rm -v "$PWD":/work quant python test_check_prices.py  # 昨收校验判定逻辑
 ```
 
 No linters configured.
@@ -47,7 +50,8 @@ data.py → strategy.py → backtest.py (single-asset)  → metrics.py / report.
 - **test_portfolio.py** — unit tests for the portfolio engine (T+1, lots, fees, slippage, stamp tax, cash conservation) using hand-built price data. Run them after touching portfolio.py.
 - **test_strategy.py** — unit tests for rotation/ensemble/drawdown control, including a no-look-ahead test (truncating future data must not change historical control coefficients). Run them after touching strategy.py.
 
-- **data.py** — fetches stock/ETF daily bars (前复权/qfq) and CSI 300 benchmark via akshare with retry; caches as CSV in `data/` keyed by `{name}_{start}_{end}.csv` (delete to force refresh; empty caches are treated as misses). Eastmoney failures fall back to Sina — Sina ETF data is **unadjusted** and cached under a separate `_sina` key to avoid contaminating qfq caches.
+- **data.py** — fetches stock/ETF daily bars (前复权/qfq) and CSI 300 benchmark via akshare with retry; caches as CSV in `data/` keyed by `{name}_{start}_{end}.csv` (delete to force refresh; empty caches are treated as misses). Built-in「名新实旧」guard `_cache_would_lie`: a cache whose filename `end` ≥ today but whose data hasn't reached the last trade date ≤ `end` (per trade calendar) is neither written nor honored on read — prevents a lagging-source fetch from permanently blocking later authoritative pulls (self-heals once the source catches up; calendar unavailable → conservatively no caching). Eastmoney failures fall back to Tencent (qfq paging with no-progress + page-cap guards) then Sina — Sina ETF data is **unadjusted** and cached under a separate `_sina` key; **`qfq_only=True` (daily_signal/check_risk money paths) refuses the Sina fallback outright** rather than mixing adjustment regimes across the cross-section.
+- **Ledger locking** — `output/.ledger.lock` serializes all read-modify-write of `executions.csv`/`signal_log.csv`: daily_signal.py holds it around holdings-read→log-append→write_planned; record_trade.py takes `.daily_local.lock` (orchestration layer, shared with daily_local.sh) **then** `.ledger.lock` — always in that order (daily_local.sh's child daily_signal only takes the ledger lock, so no deadlock). `daily_signal.account_equity()` estimates buy share counts from the real replayed account value (fallback `--capital`); ledger integrity errors (parse failure/negative cash/negative position/non-finite or garbage amounts) **propagate and fail the signal run** (fail-closed) rather than silently degrading.
 - **strategy.py** — single-asset strategies take an OHLCV DataFrame and return a 0/1 position Series; `etf_momentum_rotation()` takes a closes table and returns a target-weight DataFrame (top-1 momentum, absolute-momentum filter to cash, switch buffer); `etf_momentum_ensemble()` averages rotation weights across `lookbacks` (weights become fractional, row sum ≤ 1); `apply_drawdown_control()` scales weights by `DD_SCALE` when the strategy's virtual NAV drops below its `DD_MA_WINDOW`-day MA — must stay causal (T-day coefficient uses only data ≤ T). Signals are computed on close; execution is next-day open (T+1). Use `pct_change(..., fill_method=None)` to avoid forward-filling stale prices.
 - **backtest.py** — `run_backtest()` simulates day by day: shifts the position series by 1 day (T+1), trades at the open price in 100-share lots, and models A-share fees (commission with 5 CNY minimum, stamp tax on sells only). Returns `BacktestResult` with daily equity and a `Trade` list.
 - **metrics.py** — total/annualized return, Sharpe (252 trading days), max drawdown, win rate per completed buy→sell round.

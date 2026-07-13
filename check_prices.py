@@ -29,7 +29,15 @@ import config
 import data
 from daily_signal import data_end_date
 
-TOL = 0.0015  # 昨收比对容差(绝对值,元)
+TOL_MIN = 0.001   # 容差下限(元):三位小数行情的最后一位舍入
+TOL_REL = 0.0005  # 相对容差 0.05%:池内价位跨两个数量级(159920 ~1.4元 vs 511260 ~135元),
+                  # 绝对容差对高价 ETF 过严(0.0015 元只有 0.001%,正常舍入即误报)、
+                  # 对低价 ETF 过松,须按价位缩放
+
+
+def _tol(px: float) -> float:
+    """按价位的比对容差:max(下限, 价格×0.05%)"""
+    return max(TOL_MIN, abs(px) * TOL_REL)
 SINA_HEADERS = {"Referer": "https://finance.sina.com.cn"}  # 新浪接口需 Referer 否则 403
 
 
@@ -112,7 +120,7 @@ def verdict(sys_prev: float, sys_pp: float | None,
     启发式区分"盘前未滚动"(skip)与"真实不一致"(mismatch)。
     """
     if dated_val is not None:
-        if abs(sys_prev - dated_val) <= TOL:
+        if abs(sys_prev - dated_val) <= _tol(sys_prev):
             return "ok", "新浪日K线"
         return "mismatch", f"新浪日K线 {dated_val:.3f}"
 
@@ -123,11 +131,11 @@ def verdict(sys_prev: float, sys_pp: float | None,
     # 特例:若上一交易日与上上交易日同价(差<容差),实时源即使等于该价也无法证明
     # 它已滚动到正确日期(可能是盘前未滚动的陈值),按"未验证"处理,留给 skip,
     # 不计 match(否则会用一个无法区分新旧的值谎报已校验);带日期权威源存在时已提前返回,不受影响
-    ambiguous = sys_pp is not None and abs(sys_prev - sys_pp) <= TOL
+    ambiguous = sys_pp is not None and abs(sys_prev - sys_pp) <= _tol(sys_prev)
     matched, diff = [], {}
     for src, v in realtime_vals.items():
-        near_prev = abs(v - sys_prev) <= TOL
-        near_pp = sys_pp is not None and abs(v - sys_pp) <= TOL
+        near_prev = abs(v - sys_prev) <= _tol(sys_prev)
+        near_pp = sys_pp is not None and abs(v - sys_pp) <= _tol(sys_pp)
         if near_pp and ambiguous:
             continue  # 同价歧义:既不算 match 也不算 diff,留作 skip
         if near_prev:

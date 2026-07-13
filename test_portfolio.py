@@ -103,6 +103,53 @@ def test_equity_conservation():
     assert abs(result.equity.iloc[-1] - (100_000 - total_fees)) < 1e-6
 
 
+def test_rebalance_band_skips_small_drift_but_zero_target_sells_all():
+    """再平衡带宽的不对称行为(锚定,防重构时被'顺手统一'):
+    - 目标权重 >0 且偏离金额 < band → 不交易(避免每日小额漂移调仓的费用拖累)
+    - 目标权重 =0 → 清仓,不受带宽限制(真离场不能被带宽吞掉)
+    """
+    prices = make_prices(5, price_a=10.0)
+    idx = prices["A"].index
+    weights = pd.DataFrame(0.0, index=idx, columns=["A", "B"])
+    weights.loc[idx[0], "A"] = 1.00   # T+1:第2日建仓 A
+    weights.loc[idx[1], "A"] = 0.99   # T+1:第3日目标 0.99,偏离 ~1% < band 2% → 应不交易
+    # idx[2] 起信号归 0 → T+1:第4日应清仓(权重归零不受带宽限制)
+
+    result = run_portfolio_backtest(prices, weights, initial_capital=100_000,
+                                    slippage=0.0, rebalance_band=0.02)
+    by_day = {}
+    for t in result.trades:
+        by_day.setdefault(t.date, []).append(t)
+    assert idx[1] in by_day and by_day[idx[1]][0].side == "buy"   # 第2日建仓
+    assert idx[2] not in by_day                                    # 第3日带宽内,不动
+    day4 = by_day.get(idx[3], [])
+    assert len(day4) == 1 and day4[0].side == "sell"               # 第4日清仓
+    assert day4[0].shares == result.trades[0].shares               # 卖光全部持仓
+
+
+def test_multi_buy_budget_order_independent():
+    """同日多标的买入按现金快照比例分配预算,结果与列顺序/字典插入顺序无关"""
+    idx = pd.date_range("2024-01-01", periods=3, freq="B")
+    a = pd.DataFrame({"open": 10.0, "close": 10.0}, index=idx)
+    b = pd.DataFrame({"open": 20.0, "close": 20.0}, index=idx)
+
+    def run(order):
+        prices = {s: (a if s == "A" else b) for s in order}
+        weights = pd.DataFrame(0.0, index=idx, columns=order)
+        weights.loc[idx[0], "A"] = 0.5
+        weights.loc[idx[0], "B"] = 0.5
+        return run_portfolio_backtest(prices, weights, initial_capital=100_000, slippage=0.0)
+
+    r1, r2 = run(["A", "B"]), run(["B", "A"])
+    h1 = {t.symbol: t.shares for t in r1.trades if t.side == "buy"}
+    h2 = {t.symbol: t.shares for t in r2.trades if t.side == "buy"}
+    assert h1 == h2, f"买入结果依赖顺序: {h1} vs {h2}"
+    # 各按 ~50% 预算成交(10元/20元 → 约 4900-5000 / 2400-2500 股),现金不透支
+    assert 4800 <= h1["A"] <= 5000 and 2400 <= h1["B"] <= 2500
+    total_cost = sum(t.amount + t.fee for t in r1.trades if t.side == "buy")
+    assert total_cost <= 100_000 + 1e-6
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

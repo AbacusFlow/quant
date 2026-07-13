@@ -73,6 +73,19 @@ def test_ambiguous_prev_equals_pp_with_real_diff_still_warns():
     assert level == "mismatch" and "4.700" in detail
 
 
+def test_relative_tolerance_high_price():
+    """高价 ETF(~135元)最后一位舍入差(0.01)在相对容差 0.05% 内 → ok
+    (旧绝对容差 0.0015 元会把正常舍入误报为 mismatch)"""
+    level, _ = verdict(134.940, 134.500, dated_val=134.95, realtime_vals={})
+    assert level == "ok"
+
+
+def test_relative_tolerance_low_price_still_strict():
+    """低价 ETF(~1.4元)差 0.01 已是 0.7% → 仍须 mismatch(容差下限 0.001 保持严格)"""
+    level, detail = verdict(1.428, 1.410, dated_val=1.438, realtime_vals={})
+    assert level == "mismatch" and "1.438" in detail
+
+
 def test_no_source_is_nodata():
     """所有源都没给昨收 → nodata(无法校验,告警)"""
     level, detail = verdict(PREV, PP, dated_val=None, realtime_vals={})

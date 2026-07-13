@@ -22,7 +22,14 @@ set -uo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-DOCKER_RUN=(docker run --rm --network=host -v "$PROJECT_DIR":/work quant python)
+# 容器挂载最小化:仓库只读 + output/data 可写,.env 遮蔽(容器解析外部数据源响应,
+# 是攻击面最大的进程;即便被攻破也改不了宿主机会执行的 scripts/*.sh、拿不到 token)
+DOCKER_RUN=(docker run --rm --network=host
+    -v "$PROJECT_DIR":/work:ro
+    -v "$PROJECT_DIR/output":/work/output
+    -v "$PROJECT_DIR/data":/work/data
+    -v /dev/null:/work/.env:ro
+    quant python)
 LEDGER=(output/signal_log.csv output/executions.csv)
 
 LOG_DIR="output"
@@ -74,8 +81,11 @@ flush_spool() {
             return 1
         fi
         body=$(cat "$f")
-        resp=$(curl -sS --max-time 20 "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TG_CHAT_ID}" --data-urlencode "text=$body" 2>&1)
+        # token 经 -K- 配置管道传入,不上命令行(防 ps/cmdline 泄漏)
+        resp=$(curl -sS --max-time 20 -K- \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" --data-urlencode "text=$body" \
+            <<<"url = \"https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage\"" 2>&1)
+        resp=${resp//"$TG_BOT_TOKEN"/<TG_BOT_TOKEN>}   # curl 网络错误消息可能含完整 URL,写日志前脱敏
         if echo "$resp" | grep -q '"ok" *: *true'; then
             echo "推送成功: $(head -1 "$f")" >> "$RUN_LOG"
             rm -f "$f"

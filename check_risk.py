@@ -34,7 +34,9 @@ def check(mode: str, capital: float, vol_control: bool = False,
 
     now = dt.datetime.now(ZoneInfo("Asia/Shanghai"))
     end = data_end_date(now).isoformat()
-    prices = load_pool(config.ROTATION_START, end)
+    # 读侧路径:write_cache=False 绝不落盘(缓存由 daily_signal 权威写入);
+    # qfq_only=True 拒绝新浪不复权回退——回撤告警基线须与信号同复权口径
+    prices = load_pool(config.ROTATION_START, end, write_cache=False, qfq_only=True)
     closes = closes_table(prices).loc[:end]
     if confirmed["date"].max() > closes.index[-1]:
         # 盘中手动运行时今日成交尚无收盘行情;CI 开盘前运行不会出现,不算告警
@@ -56,7 +58,8 @@ def check(mode: str, capital: float, vol_control: bool = False,
     if extra:
         closes = closes.copy()
         for s in extra:
-            px = data.get_etf_daily(s, config.ROTATION_START, end)["close"]
+            px = data.get_etf_daily(s, config.ROTATION_START, end,
+                                    write_cache=False, qfq_only=True)["close"]
             closes[s] = px.reindex(closes.index).ffill()
     _, navs, _ = real_equity_series(confirmed, closes)
     cur_dd = 1 - float(navs.iloc[-1]) / float(navs.max())

@@ -22,6 +22,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import sys
 
 import requests
@@ -29,6 +30,7 @@ import requests
 BASE_URL = "https://mkapi2.dfcfs.com/finskillshub/api/claw/query"
 BATCH_SIZE = 5          # 单次自然语言 query 的实体数上限(超过会被截断)
 WINDOW_DAYS = 7         # 查询窗口 [end-7d, end],覆盖节假日仍能取到最近交易日
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")  # 输出的 end 会被调用方用作文件路径组件,必须是干净日期
 
 
 def _query(api_key: str, tool_query: str) -> dict:
@@ -110,8 +112,11 @@ def fetch_latest(api_key: str, symbols: list[str], end: str) -> dict:
         raise RuntimeError("mx_data 未返回任何收盘数据: " + "; ".join(errors) if errors
                            else "mx_data 未返回任何收盘数据")
 
-    # 最新交易日 = 所有标的里 ≤ end 的最大日期(节假日时自动回退到上一交易日)
-    all_dates = {d for series in collected.values() for d in series if d <= end}
+    # 最新交易日 = 所有标的里 ≤ end 的最大日期(节假日时自动回退到上一交易日)。
+    # 必须先过 DATE_RE:日期来自外部 API 响应,会被 postclose_local.sh 直接拼进
+    # 回执/spool 文件路径——不校验格式则恶意/异常响应(如 "../../x")可路径逃逸
+    all_dates = {d for series in collected.values() for d in series
+                 if DATE_RE.match(d) and d <= end}
     if not all_dates:
         raise RuntimeError("mx_data 返回的日期均晚于请求 end")
     latest = max(all_dates)

@@ -17,6 +17,8 @@ import html
 import io
 import math
 import os
+import sys
+import traceback
 
 import matplotlib
 
@@ -160,7 +162,11 @@ def load_executions() -> pd.DataFrame | None:
     """
     if not os.path.exists(EXEC_PATH):
         return None
-    df = pd.read_csv(EXEC_PATH, encoding="utf-8-sig", dtype={"symbol": str})
+    # keep_default_na=False:只有真正的空单元格算"留空"。pandas 默认 NA 词表会把
+    # "NULL"/"N/A"/"None"/"nan" 等非空文本在读取阶段静默变 NaN,使乱值 amount 绕过
+    # 下方解析校验、被当作"未填"走默认佣金估算——账本边界必须显式拒绝这类值。
+    df = pd.read_csv(EXEC_PATH, encoding="utf-8-sig", dtype={"symbol": str},
+                     keep_default_na=False)
     if df.empty:
         return None
     if "status" not in df.columns:
@@ -171,13 +177,26 @@ def load_executions() -> pd.DataFrame | None:
     df["symbol"] = df["symbol"].astype(str).str.strip()
     parsed_date = pd.to_datetime(df["date"], errors="coerce")
     for col in ("price", "shares", "amount"):
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        raw = df[col]
+        num = pd.to_numeric(raw, errors="coerce")
+        # 非空文本却解析失败(如 "abc"/"NULL"/"N/A"/"nan"):不得静默 coerce 成 NaN
+        # 当作"未填"——买卖行 amount 允许留空走默认佣金估算,但乱值≠留空,是账本损坏。
+        # 配合上方 keep_default_na=False,pandas 默认 NA 词表不再抢先吞掉这些文本。
+        bad = num.isna() & raw.notna() & (raw.astype(str).str.strip() != "")
+        if bad.any():
+            j = bad.idxmax()
+            raise ValueError(f"第 {j + 2} 行 {col} 无法解析为数值: {raw[j]!r}")
+        df[col] = num
     for i, r in df.iterrows():
         rowno = i + 2  # 含表头的 CSV 行号
         if pd.isna(r["action"]):
             raise ValueError(f"第 {rowno} 行 action 无效: {raw_action[i]}(应为 买入/卖出/入金/出金)")
         if pd.isna(parsed_date[i]):
             raise ValueError(f"第 {rowno} 行日期无效: {r['date']}")
+        for col in ("price", "shares", "amount"):
+            if pd.notna(r[col]) and not math.isfinite(float(r[col])):
+                raise ValueError(f"第 {rowno} 行 {col} 非有限数值: {r[col]}"
+                                 "(inf/nan 会污染净值与资产估算)")
         if pd.notna(r["amount"]) and float(r["amount"]) <= 0:
             raise ValueError(f"第 {rowno} 行 amount 必须为正数")
         if r["action"] in ("deposit", "withdraw"):
@@ -196,6 +215,41 @@ def load_executions() -> pd.DataFrame | None:
                 raise ValueError(f"第 {rowno} 行 shares 必须为整数股")
     df["date"] = parsed_date
     return df.sort_values("date", kind="stable").reset_index(drop=True)
+
+
+def _apply_exec_row(r: pd.Series, pos: dict[str, int], cash: float) -> tuple[float, float]:
+    """账本现金流规则的**唯一实现**:把一行已成交流水应用到 (pos, cash)。
+
+    返回 (新 cash, 外部资金流 flow:入金为正、出金为负,买卖为 0)。
+    口径:买入现金减 amount(缺则 gross+默认佣金),卖出加 amount(缺则 gross-默认佣金);
+    负现金/负持仓即抛 ValueError。real_equity_series / replay_positions / record_trade
+    校验全部经由本函数,避免同一规则写多份导致口径漂移。
+    """
+    if r["action"] == "deposit":
+        amt = float(r["amount"])
+        return cash + amt, amt
+    if r["action"] == "withdraw":
+        amt = float(r["amount"])
+        cash -= amt
+        if cash < -0.01:
+            raise ValueError(f"{r['date'].date()} 出金后现金为负,请检查流水")
+        return cash, -amt
+    gross = float(r["price"]) * int(r["shares"])
+    fee_default = max(gross * config.ETF_COMMISSION_RATE, config.COMMISSION_MIN)
+    if r["action"] == "buy":
+        cost = float(r["amount"]) if pd.notna(r["amount"]) else gross + fee_default
+        cash -= cost
+        pos[r["symbol"]] = pos.get(r["symbol"], 0) + int(r["shares"])
+        if cash < -0.01:
+            raise ValueError(f"{r['date'].date()} 买入 {r['symbol']} 后现金为负,"
+                             "请检查流水(是否漏记入金或金额多写)")
+    else:
+        proceeds = float(r["amount"]) if pd.notna(r["amount"]) else gross - fee_default
+        cash += proceeds
+        pos[r["symbol"]] = pos.get(r["symbol"], 0) - int(r["shares"])
+        if pos[r["symbol"]] < 0:
+            raise ValueError(f"{r['date'].date()} 卖出 {r['symbol']} 后持仓为负,请检查流水")
+    return cash, 0.0
 
 
 def real_equity_series(execs: pd.DataFrame, closes: pd.DataFrame) -> tuple[pd.Series, pd.Series, float]:
@@ -232,31 +286,9 @@ def real_equity_series(execs: pd.DataFrame, closes: pd.DataFrame) -> tuple[pd.Se
         todo = execs.index[(~applied) & (execs["date"] <= day)]
         flow_today = 0.0  # 当日净流入,按日初(前一日 NAV)折份额
         for i in todo:
-            r = execs.loc[i]
-            if r["action"] == "deposit":
-                amt = float(r["amount"])
-                cash += amt; net_deposit += amt; flow_today += amt
-            elif r["action"] == "withdraw":
-                amt = float(r["amount"])
-                cash -= amt; net_deposit -= amt; flow_today -= amt
-                if cash < -0.01:
-                    raise ValueError(f"{r['date'].date()} 出金后现金为负,请检查流水")
-            else:
-                gross = float(r["price"]) * int(r["shares"])
-                fee_default = max(gross * config.ETF_COMMISSION_RATE, config.COMMISSION_MIN)
-                if r["action"] == "buy":
-                    cost = float(r["amount"]) if pd.notna(r["amount"]) else gross + fee_default
-                    cash -= cost
-                    pos[r["symbol"]] = pos.get(r["symbol"], 0) + int(r["shares"])
-                    if cash < -0.01:
-                        raise ValueError(f"{r['date'].date()} 买入 {r['symbol']} 后现金为负,"
-                                         "请检查流水(是否漏记入金或金额多写)")
-                else:
-                    proceeds = float(r["amount"]) if pd.notna(r["amount"]) else gross - fee_default
-                    cash += proceeds
-                    pos[r["symbol"]] = pos.get(r["symbol"], 0) - int(r["shares"])
-                    if pos[r["symbol"]] < 0:
-                        raise ValueError(f"{r['date'].date()} 卖出 {r['symbol']} 后持仓为负,请检查流水")
+            cash, flow = _apply_exec_row(execs.loc[i], pos, cash)
+            net_deposit += flow
+            flow_today += flow
             applied[i] = True
         eq = cash + sum(n * float(closes.at[day, s]) for s, n in pos.items() if n)
         equity.at[day] = eq
@@ -321,8 +353,10 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
         closes = closes.copy()
         for s in extra:
             try:
+                # 展示补价:绝不落盘(防「名新实旧」缓存;data.py 另有内置防线兜底)
                 px = data.get_etf_daily(s, config.ROTATION_START,
-                                        str(closes.index[-1].date()))["close"]
+                                        str(closes.index[-1].date()),
+                                        write_cache=False)["close"]
             except Exception as e:
                 return (f'<h2>实盘 vs 模拟</h2><p style="color:#c00">池外标的 {s} 行情获取失败:'
                         f'{html.escape(str(e))}</p>{exec_table(execs)}{guide}')
@@ -383,35 +417,14 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
 def replay_positions(confirmed: pd.DataFrame) -> tuple[dict[str, int], float]:
     """回放已成交流水,返回 (最终持仓 {symbol: shares(!=0)}, 现金余额)。
 
-    口径与 real_equity_series 的账本回放严格一致:买入现金减 amount(缺则
-    gross+费),卖出现金加 amount(缺则 gross-费),入金/出金直接加减现金,
-    并沿用同款负现金/负持仓校验(异常流水抛 ValueError,交由上层吞掉)。
+    现金流规则经由 _apply_exec_row(与 real_equity_series 同一实现,不会漂移),
+    含负现金/负持仓校验(异常流水抛 ValueError,交由上层处理)。
     仅用于展示当前持仓与策略目标的对照,不做净值折份额。
     """
     cash = 0.0
     pos: dict[str, int] = {}
     for _, r in confirmed.iterrows():
-        if r["action"] == "deposit":
-            cash += float(r["amount"])
-        elif r["action"] == "withdraw":
-            cash -= float(r["amount"])
-            if cash < -0.01:
-                raise ValueError(f"{r['date'].date()} 出金后现金为负,请检查流水")
-        else:
-            gross = float(r["price"]) * int(r["shares"])
-            fee_default = max(gross * config.ETF_COMMISSION_RATE, config.COMMISSION_MIN)
-            if r["action"] == "buy":
-                cost = float(r["amount"]) if pd.notna(r["amount"]) else gross + fee_default
-                cash -= cost
-                pos[r["symbol"]] = pos.get(r["symbol"], 0) + int(r["shares"])
-                if cash < -0.01:
-                    raise ValueError(f"{r['date'].date()} 买入 {r['symbol']} 后现金为负,请检查流水")
-            else:
-                proceeds = float(r["amount"]) if pd.notna(r["amount"]) else gross - fee_default
-                cash += proceeds
-                pos[r["symbol"]] = pos.get(r["symbol"], 0) - int(r["shares"])
-                if pos[r["symbol"]] < 0:
-                    raise ValueError(f"{r['date'].date()} 卖出 {r['symbol']} 后持仓为负,请检查流水")
+        cash, _ = _apply_exec_row(r, pos, cash)
     return {s: n for s, n in pos.items() if n}, cash
 
 
@@ -508,6 +521,9 @@ def holdings_vs_target_html(closes: pd.DataFrame, weights: pd.DataFrame) -> str:
                 f'<table><tr><th>标的</th><th>实际持仓</th><th>实际市值</th><th>实际占比</th>'
                 f'<th>策略目标占比</th><th>偏离</th><th>参考调整</th></tr>{rows}</table>')
     except Exception:
+        # 容错但不静默:留痕到 stderr(cron 日志可见),否则本段因数据回归永久消失也无人察觉
+        print("holdings_vs_target_html 生成失败(整页不受影响):", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return ""
 
 
