@@ -12,7 +12,7 @@ import pandas as pd
 import config
 import daily_signal
 import report_web
-from report_web import _apply_exec_row
+from report_web import _apply_exec_row, load_executions, overnight_held_symbols
 
 FEE_MIN = config.COMMISSION_MIN  # 5 元最低佣金,测试金额较小时恒命中
 
@@ -199,6 +199,51 @@ def test_account_equity_degrades_gracefully():
                            + "2026-01-06,买入,512880,1.0,1000,,,已成交\n")
     try:
         assert daily_signal.account_equity(pd.Series({"510300": 1.0})) is None
+    finally:
+        restore()
+
+
+def test_overnight_held_symbols():
+    """池外补价范围:当日买入又卖光(日终恒0,如误买纠错的513300)不需要行情;
+    隔夜持有过的(即使后来清仓)需要——qfq_only 下多拉一个冷门标的都可能拖垮检查"""
+    restore = _with_ledger(
+        HEADER
+        + "2026-01-05,入金,,,,100000,,已成交\n"
+        + "2026-01-06,买入,513300,2.672,3700,,,已成交\n"   # 当日
+        + "2026-01-06,卖出,513300,2.65,3700,,,已成交\n"    # 当日卖光 → 日终0,不需要
+        + "2026-01-06,买入,513100,2.194,4400,,,已成交\n"   # 隔夜持有
+        + "2026-01-08,卖出,513100,2.254,4400,,,已成交\n")  # 后清仓 → 仍需历史行情
+    try:
+        execs = load_executions()
+        held = overnight_held_symbols(execs[execs["status"] != "计划"])
+        assert held == {"513100"}, f"应只含隔夜持有过的 513100,实得 {held}"
+    finally:
+        restore()
+
+
+def test_overnight_held_uses_valuation_calendar():
+    """判定必须按估值日历而非自然日:成交日不在 closes.index 时,买卖会被并到
+    下一估值日一次性应用互相抵消(该标的实际不需要行情);无日历时保守按自然日"""
+    restore = _with_ledger(
+        HEADER
+        + "2026-01-05,入金,,,,100000,,已成交\n"
+        + "2026-01-06,买入,513300,2.672,3700,,,已成交\n"   # 01-06 不在估值日历
+        + "2026-01-07,卖出,513300,2.65,3700,,,已成交\n")   # 下一估值日前已清零
+    try:
+        execs = load_executions()
+        conf = execs[execs["status"] != "计划"]
+        vi = pd.DatetimeIndex([pd.Timestamp("2026-01-05"), pd.Timestamp("2026-01-07"),
+                               pd.Timestamp("2026-01-08")])
+        # 买(01-06)卖(01-07)都映射到估值日 01-07 → 净 0 → 不需要行情
+        assert overnight_held_symbols(conf, vi) == set()
+        # 无估值日历:退化为自然日 → 保守判为持有过(超集,绝不漏价)
+        assert overnight_held_symbols(conf) == {"513300"}
+        # 成交晚于最后估值日 → 归越界哨兵桶:买卖同落桶净0排除
+        vi_short = pd.DatetimeIndex([pd.Timestamp("2026-01-05")])
+        assert overnight_held_symbols(conf, vi_short) == set()
+        # 哨兵桶净非零 → 保守计入(只有越界买入未卖)
+        only_buy = conf[~((conf["action"] == "sell") & (conf["symbol"] == "513300"))]
+        assert overnight_held_symbols(only_buy, vi_short) == {"513300"}
     finally:
         restore()
 

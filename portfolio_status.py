@@ -28,7 +28,8 @@ import pandas as pd
 import config
 import data
 from daily_signal import data_end_date
-from report_web import load_executions, real_equity_series, replay_positions
+from report_web import (load_executions, overnight_held_symbols, real_equity_series,
+                        replay_positions)
 from run_rotation import build_weights, closes_table, load_pool
 
 DEV_THRESHOLD = 0.05  # 偏离绝对值 >5pp 才在消息里单列(2% 内本就可忽略,5% 才提示手动)
@@ -124,9 +125,9 @@ def build_status_block(mode: str, vol_control: bool, sleeve: bool,
                                 vol_control=vol_control, sleeve=sleeve)
         pos, cash = replay_positions(confirmed)
         held = {s for s, sh in pos.items() if sh}  # 当前仍持有(非零)的标的
-        # 池外标的(如误买错代码后的持有)按需补收盘价,口径同 check_risk
-        extra = sorted(set(confirmed.loc[confirmed["action"].isin(("buy", "sell")), "symbol"])
-                       - set(closes.columns))
+        # 池外标的(如误买错代码后的持有)按需补收盘价,口径同 check_risk:
+        # 只补「曾隔夜持有」的标的(当日买卖光的纠错标的日终恒 0 不参与计价)
+        extra = sorted(overnight_held_symbols(confirmed, closes.index) - set(closes.columns))
         if extra:
             closes = closes.copy()
             for s in extra:

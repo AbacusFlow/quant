@@ -252,6 +252,37 @@ def _apply_exec_row(r: pd.Series, pos: dict[str, int], cash: float) -> tuple[flo
     return cash, 0.0
 
 
+def overnight_held_symbols(confirmed: pd.DataFrame,
+                           valuation_index: pd.DatetimeIndex | None = None) -> set[str]:
+    """曾在**估值日**日终持有非零仓位的标的集合——只有这些需要历史行情来计净值。
+
+    净值只在 valuation_index(即 closes.index)的日期估值,且 real_equity_series
+    会把「上个估值日之后」的全部流水在下一估值日一次性应用后才计价(只对 n!=0
+    取价)。因此判定口径必须与之一致:每笔成交先映射到首个 ≥ 成交日的估值日,
+    再按估值日汇总净额累计——当日(或跨到同一估值日)买入又卖光的标的
+    (如 2026-06-12 误买纠错的 513300)在任何估值点持仓恒为 0,行情永远用不上。
+    池外补价只补本集合内的标的:避免为不需要计价的冷门代码强拉行情——
+    qfq_only 下该类标的源不可用会白白拖垮整个检查/展示。
+
+    valuation_index 缺省时退化为按成交自然日累计(保守超集:绝不漏、可能多补)。
+    晚于最后估值日的成交归入越界哨兵桶,持仓非零同样计入(保守)。
+    """
+    trades = confirmed[confirmed["action"].isin(("buy", "sell"))]
+    out: set[str] = set()
+    for s, g in trades.groupby("symbol"):
+        delta = g.apply(lambda r: int(r["shares"]) * (1 if r["action"] == "buy" else -1), axis=1)
+        if valuation_index is not None and len(valuation_index):
+            vi = valuation_index.sort_values()
+            ext = vi.append(pd.DatetimeIndex([vi[-1] + pd.Timedelta(days=1)]))  # 越界哨兵桶
+            keys = pd.Series(ext[vi.searchsorted(g["date"].values)], index=g.index)
+        else:
+            keys = g["date"]
+        eod = delta.groupby(keys).sum().cumsum()  # 按估值日净额累计 = 各估值日日终持仓
+        if (eod != 0).any():
+            out.add(str(s))
+    return out
+
+
 def real_equity_series(execs: pd.DataFrame, closes: pd.DataFrame) -> tuple[pd.Series, pd.Series, float]:
     """根据成交流水重建真实账户。返回 (每日总资产, 份额化净值 NAV, 累计净入金)。
 
@@ -347,8 +378,8 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
                 f'见下表)。</p>{exec_table(execs)}{guide}')
 
     # 池外标的(误买)的收盘价不在轮动 closes 表里,按需补列用于净值计算
-    extra = sorted(set(confirmed.loc[confirmed["action"].isin(("buy", "sell")), "symbol"])
-                   - set(closes.columns))
+    # ——只补「曾隔夜持有」的标的(当日买卖光的纠错标的日终恒 0 不参与计价)
+    extra = sorted(overnight_held_symbols(confirmed, closes.index) - set(closes.columns))
     if extra:
         closes = closes.copy()
         for s in extra:

@@ -18,7 +18,7 @@ import data
 import metrics as metrics_mod
 from daily_signal import data_end_date
 from portfolio import run_portfolio_backtest
-from report_web import load_executions, real_equity_series
+from report_web import load_executions, overnight_held_symbols, real_equity_series
 from run_rotation import build_weights, closes_table, load_pool
 
 DD_ALERT_MULT = 1.5  # 实盘回撤超过回测最大回撤的 1.5 倍 → 暂停加仓、深度复盘
@@ -53,8 +53,9 @@ def check(mode: str, capital: float, vol_control: bool = False,
     bt_maxdd = -float(metrics_mod.equity_metrics(bt_equity)["最大回撤"])  # 转为正数
 
     # 实盘份额化净值(口径同 report_web「实盘 vs 模拟」);池外标的按需补收盘价
-    extra = sorted(set(confirmed.loc[confirmed["action"].isin(("buy", "sell")), "symbol"])
-                   - set(closes.columns))
+    # ——只补「曾隔夜持有」的标的(当日买卖光的纠错标的日终恒 0 不参与计价,
+    #   qfq_only 下强拉其行情会因源不可用而拖垮整个回撤检查)
+    extra = sorted(overnight_held_symbols(confirmed, closes.index) - set(closes.columns))
     if extra:
         closes = closes.copy()
         for s in extra:
