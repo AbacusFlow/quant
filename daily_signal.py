@@ -51,8 +51,8 @@ def ledger_lock():
         os.close(fd)
 
 
-def account_equity(last_close: pd.Series) -> float | None:
-    """真实账户总资产:已成交流水回放持仓/现金 + 最新收盘计价。
+def account_state(last_close: pd.Series) -> tuple[float, float] | None:
+    """真实账户状态:已成交流水回放持仓/现金 + 最新收盘计价,返回 (总资产, 现金)。
 
     用于替代静态 --capital 估算下单股数(资产随行情波动,.env 快照会系统性偏差)。
 
@@ -85,7 +85,8 @@ def account_equity(last_close: pd.Series) -> float | None:
     if not math.isfinite(total) or total < -0.01:
         # 非有限/显著为负的总资产 = 账本或行情数据异常,fail-closed:抛错而非回退 --capital
         raise ValueError(f"账本回放总资产异常({total!r}),请检查流水与行情")
-    return max(total, 0.0)  # 现金浮点残差(如 -2e-13)夹到 0,合法零资产如实返回
+    # 现金浮点残差(如 -2e-13)夹到 0,合法零资产如实返回
+    return max(total, 0.0), max(cash, 0.0)
 
 
 def data_end_date(now: dt.datetime) -> dt.date:
@@ -111,6 +112,108 @@ def latest_weights(end: str, mode: str, vol_control: bool = False,
         sleeve=sleeve,
     )
     return weights.iloc[-1], closes.iloc[-1]
+
+
+PLAN_MARGIN = 0.01  # 现金封顶的隔夜跳空/滑点安全垫:卖出回款按 -1%、买入成本按 +1% 估
+
+
+def _fee(amount: float) -> float:
+    """佣金口径与账本/回测引擎一致(report_web._apply_exec_row / portfolio._commission)"""
+    return max(amount * config.ETF_COMMISSION_RATE, config.COMMISSION_MIN)
+
+
+def plan_orders(target_w: pd.Series, holdings: dict[str, int], last_close: pd.Series,
+                equity: float | None, cash: float | None,
+                band: float = config.REBALANCE_BAND,
+                margin: float = PLAN_MARGIN) -> tuple[list[tuple[str, str, int]], list[str]]:
+    """按回测引擎口径规划调仓订单:目标股数 desired=⌊equity×目标权重/px⌋整手,
+    与**实际持仓**之差生成订单(先卖后买)。返回 (orders, notes)。
+
+    对比旧「前后信号权重差」方案的关键差异:部分成交/现金不足导致的仓位漂移会被
+    直接对齐(与 portfolio.py 引擎 desired-vs-shares 同构),不再依赖 prev 信号
+    准确代表实际仓位;加仓后欠配的已持仓标的也会生成补仓单(带宽防漂移刷屏)。
+
+    规则:
+    - 带宽:|desired-held|×px < band×equity 不交易(费用拖累);目标权重 ≤0.005 的
+      真清仓、池外持仓清仓不受带宽限制(与引擎的不对称行为一致)
+    - 现金封顶(cash 非 None 时):avail = cash + Σ[卖出估值×(1−margin) − 佣金],
+      买入按 px×(1+margin)+佣金 依次装入,超出则整手缩量、不足一手放弃;
+      margin 为隔夜跳空/滑点安全垫,佣金用真实公式(万0.5 最低5元)
+    - equity 为 None(账本与 --capital 均不可用)→ 只生成清仓类订单
+    - notes 为诊断说明行,措辞不含「买入/卖出」(daily_local.sh 用该关键词 grep 指令行)
+    """
+    orders_sell: list[tuple[str, str, int]] = []
+    buy_cands: list[tuple[str, int]] = []
+    notes: list[str] = []
+
+    def px_of(s):
+        v = last_close.get(s)
+        return float(v) if s in last_close.index and pd.notna(v) else None
+
+    band_value = band * equity if equity else 0.0
+    # 池外持仓(目标权重表无此列)一律清仓,不受带宽限制、无需价格
+    for s, held in holdings.items():
+        if held > 0 and s not in target_w.index:
+            orders_sell.append(("卖出", s, held))
+    for s in target_w.index:
+        tgt = float(target_w[s]) if pd.notna(target_w[s]) else 0.0
+        held = holdings.get(s, 0)
+        if tgt <= 0.005:
+            if held > 0:
+                orders_sell.append(("卖出", s, held))  # 真清仓:不受带宽限制
+            continue
+        px = px_of(s)
+        if px is None or px <= 0 or equity is None:
+            if held == 0 and equity is not None:
+                notes.append(f"({s} 无有效昨收,暂无法估算建仓股数)")
+            continue
+        desired = int(equity * tgt / px // 100) * 100
+        diff = desired - held
+        if diff == 0:
+            continue
+        if abs(diff) * px < band_value:
+            if abs(diff) >= 100:
+                notes.append(f"({s} 与目标差约 {abs(diff)} 股(≈{abs(diff) * px:,.0f} 元),"
+                             f"低于再平衡带宽 {band_value:,.0f} 元,不动)")
+            continue
+        if diff < 0:
+            orders_sell.append(("卖出", s, -diff))
+        elif diff >= 100:
+            buy_cands.append((s, diff))
+
+    if cash is not None:
+        # 现金封顶:卖出回款按下浮价扣佣金、买入按上浮价加佣金,留隔夜跳空余地。
+        # 预算分配与引擎同口径(portfolio.py):按各标的待买金额**比例**切分现金快照,
+        # 佣金计入各自预算——分配结果与标的顺序无关,不会让排前的标的挤占排后的资金
+        avail = cash
+        for _, s, n in orders_sell:
+            px = px_of(s)
+            if px:
+                gross = n * px * (1 - margin)
+                avail += gross - _fee(gross)
+        total_buy_value = sum(n * float(last_close[s]) * (1 + margin) for s, n in buy_cands)
+        remaining = avail
+        capped: list[tuple[str, int]] = []
+        for s, est in buy_cands:
+            px = float(last_close[s]) * (1 + margin)
+
+            def cost(n: int) -> float:
+                return n * px + _fee(n * px)
+
+            budget = avail * (est * px / total_buy_value) if total_buy_value > 0 else 0.0
+            fit = min(est, int(budget / (px * (1 + config.ETF_COMMISSION_RATE)) // 100) * 100)
+            while fit > 0 and (cost(fit) > budget or cost(fit) > remaining):
+                fit -= 100
+            if fit < 100:
+                notes.append(f"(资金不足,略过 {s} 补仓 {est} 股;待现金回笼后由后续信号重算)")
+                continue
+            if fit < est:
+                notes.append(f"({s} 补仓按可用资金调整:{est} → {fit} 股)")
+            remaining -= cost(fit)
+            capped.append((s, fit))
+        buy_cands = capped
+
+    return orders_sell + [("买入", s, n) for s, n in buy_cands], notes
 
 
 def describe(w: pd.Series) -> str:
@@ -251,69 +354,33 @@ def main():
         exec_date = next_trade_date(signal_date)
         day_word = "今日" if exec_date == today else str(exec_date)
 
-        # 下单股数估算基准:优先真实账户资产(流水回放+最新收盘计价),
+        # 下单股数估算基准:优先真实账户资产+现金(流水回放+最新收盘计价),
         # 静态 --capital 是手工快照,行情波动后估算股数会系统性偏差;回退 --capital
-        est_capital = account_equity(last_close)
-        if est_capital is not None:
-            print(f"(股数估算基准:实际账户资产 {est_capital:,.0f} 元,流水回放按最新收盘计价)")
+        state = account_state(last_close)
+        if state is not None:
+            est_capital, avail_cash = state
+            print(f"(股数估算基准:实际账户资产 {est_capital:,.0f} 元,其中现金 {avail_cash:,.2f} 元)")
         else:
-            est_capital = args.capital
+            est_capital, avail_cash = args.capital, None
 
         orders: list[tuple[str, str, int]] = []
-        changed = False
         if prev is not None:
-            print(f"\n--- 调仓指令({day_word}开盘 09:30 执行)---")
+            print(f"\n--- 调仓指令({day_word}开盘 09:30 执行,先卖后买)---")
             holdings = current_holdings(_load_executions_raw())
-            for s in config.ETF_POOL:
-                old = float(prev.get(s, 0.0))
-                new = float(w.get(s, 0.0))
-                if abs(new - old) > 0.005:
-                    action = "买入" if new > old else "卖出"
-                    if action == "卖出":
-                        # 卖出按已成交流水的实际持仓;部分减仓按权重比例折算,无持仓则不生成计划
-                        held = holdings.get(s, 0)
-                        if new <= 0.005:
-                            est = held  # 清仓
-                        else:
-                            est = int(held * (old - new) / old // 100) * 100 if old > 0 else 0
-                    else:
-                        est = int((est_capital or 0) * abs(new - old) / last_close[s] // 100) * 100
-                    line = f"  {action} {s}({config.ETF_POOL[s]}): 目标权重 {old:.0%} -> {new:.0%}"
-                    if est >= 100:
-                        line += f",约 {est} 股(按昨收 {last_close[s]:.3f} 估算,以{day_word}开盘价为准)"
-                        orders.append((action, s, est))
-                    elif est_capital:
-                        line += f"(金额不足 1 手/100 股,可忽略)"
-                    print(line)
-                    changed = True
-            # 持仓与目标对齐:即使信号未变,实际持仓和目标不一致也生成计划
-            # (覆盖"清空流水重新开始"建仓、上次计划未确认成交等场景,计划行每日重写直到确认)
-            for s in config.ETF_POOL:
-                tgt = float(w.get(s, 0.0))
-                held = holdings.get(s, 0)
-                if tgt > 0.005 and held == 0:
-                    # 实际空仓时按完整目标权重建仓;差异循环生成的增量买入不足以对齐,予以替换
-                    est = int((est_capital or 0) * tgt / last_close[s] // 100) * 100
-                    prior = next((o for o in orders if o[0] == "买入" and o[1] == s), None)
-                    if prior:
-                        orders.remove(prior)
-                    if est >= 100:
-                        orders.append(("买入", s, est))
-                        if prior is None or prior[2] != est:
-                            print(f"  买入 {s}({config.ETF_POOL[s]}): 建仓至目标权重 {tgt:.0%},"
-                                  f"约 {est} 股(按昨收 {last_close[s]:.3f} 估算,以{day_word}开盘价为准)")
-                            changed = True
-                elif tgt <= 0.005 and held > 0 and not any(o[0] == "卖出" and o[1] == s for o in orders):
-                    orders.append(("卖出", s, held))
-                    print(f"  卖出 {s}({config.ETF_POOL[s]}): 目标权重 0,清仓 {held} 股")
-                    changed = True
-            # 信号池之外的持仓(如误买错代码)一律清仓
-            for s, held in holdings.items():
-                if s not in config.ETF_POOL and held > 0:
-                    orders.append(("卖出", s, held))
-                    print(f"  卖出 {s}: 非信号池标的(疑似误买),清仓 {held} 股")
-                    changed = True
-            if not changed:
+            # 按引擎口径规划:目标股数 vs 实际持仓(部分成交/漂移自动对齐),
+            # 带 REBALANCE_BAND 带宽与现金封顶(详见 plan_orders)
+            orders, notes = plan_orders(w, holdings, last_close,
+                                        equity=est_capital, cash=avail_cash)
+            for line in notes:
+                print(f"  {line}")
+            for action, s, est in orders:
+                name = config.ETF_POOL.get(s, "(池外)")
+                tgt = float(w.get(s, 0.0)) if s in w.index else 0.0
+                px = last_close.get(s)
+                px_s = (f"(按昨收 {float(px):.3f} 估算,以{day_word}开盘价为准)"
+                        if s in last_close.index and pd.notna(px) else "")
+                print(f"  {action} {s}({name}): 约 {est} 股,对齐目标权重 {tgt:.0%}{px_s}")
+            if not orders:
                 print("  无需调仓")
 
         if already:

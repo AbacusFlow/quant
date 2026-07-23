@@ -1,4 +1,4 @@
-"""账本现金流规则(report_web._apply_exec_row)与 account_equity fail-closed 回归测试。
+"""账本现金流规则(report_web._apply_exec_row)与 account_state fail-closed 回归测试。
 
 _apply_exec_row 是 real_equity_series / replay_positions / record_trade 校验共用的
 唯一实现,本文件锚定其口径:amount 覆盖语义、默认佣金、资金流、负现金/负持仓校验。
@@ -109,7 +109,7 @@ def test_account_equity_fail_closed_on_corrupt_ledger():
     绝不静默回退 --capital 继续生成计划(fail-closed)"""
     restore = _with_ledger(HEADER + "2026-01-05,卖出,510300,1.0,100,,,已成交\n")
     try:
-        daily_signal.account_equity(pd.Series({"510300": 1.0}))
+        daily_signal.account_state(pd.Series({"510300": 1.0}))
         raise AssertionError("损坏账本应抛 ValueError")
     except ValueError:
         pass
@@ -123,9 +123,11 @@ def test_blank_amount_still_defaults_fee():
                            + "2026-01-05,入金,,,,10000,,已成交\n"
                            + "2026-01-06,买入,510300,1.0,1000,,,已成交\n")
     try:
-        total = daily_signal.account_equity(pd.Series({"510300": 1.0}))
+        state = daily_signal.account_state(pd.Series({"510300": 1.0}))
         # 现金 10000-1000-5,持仓 1000×1.0
-        assert total is not None and abs(total - 9995.0) < 1e-6
+        assert state is not None
+        total, cash = state
+        assert abs(total - 9995.0) < 1e-6 and abs(cash - 8995.0) < 1e-6
     finally:
         restore()
 
@@ -136,9 +138,11 @@ def test_account_equity_valid_ledger():
                            + "2026-01-05,入金,,,,10000,,已成交\n"
                            + "2026-01-06,买入,510300,1.0,1000,,,已成交\n")
     try:
-        total = daily_signal.account_equity(pd.Series({"510300": 2.0}))
+        state = daily_signal.account_state(pd.Series({"510300": 2.0}))
         # 现金 10000-1000-5 = 8995,持仓 1000×2.0 = 2000
-        assert total is not None and abs(total - 10995.0) < 1e-6
+        assert state is not None
+        total, cash = state
+        assert abs(total - 10995.0) < 1e-6 and abs(cash - 8995.0) < 1e-6
     finally:
         restore()
 
@@ -150,8 +154,8 @@ def test_account_equity_zero_is_zero_not_none():
                            + "2026-01-05,入金,,,,10000,,已成交\n"
                            + "2026-01-06,出金,,,,10000,,已成交\n")
     try:
-        total = daily_signal.account_equity(pd.Series({"510300": 1.0}))
-        assert total == 0.0, f"应为 0.0(而非 None 回退 --capital),实得 {total!r}"
+        state = daily_signal.account_state(pd.Series({"510300": 1.0}))
+        assert state == (0.0, 0.0), f"应为 (0.0, 0.0)(而非 None 回退 --capital),实得 {state!r}"
     finally:
         restore()
 
@@ -161,7 +165,7 @@ def test_account_equity_rejects_infinite_amount():
     绝不静默回退 --capital"""
     restore = _with_ledger(HEADER + "2026-01-05,入金,,,,inf,,已成交\n")
     try:
-        daily_signal.account_equity(pd.Series({"510300": 1.0}))
+        daily_signal.account_state(pd.Series({"510300": 1.0}))
         raise AssertionError("inf 金额应抛 ValueError")
     except ValueError as e:
         assert "非有限" in str(e)
@@ -178,7 +182,7 @@ def test_account_equity_rejects_garbage_amount():
                     "2026-01-06,买入,510300,abc,1000,,,已成交\n"):       # price 乱值
         restore = _with_ledger(HEADER + "2026-01-05,入金,,,,10000,,已成交\n" + col_csv)
         try:
-            daily_signal.account_equity(pd.Series({"510300": 1.0}))
+            daily_signal.account_state(pd.Series({"510300": 1.0}))
             raise AssertionError("乱值应抛 ValueError")
         except ValueError as e:
             assert "无法解析" in str(e)
@@ -191,14 +195,14 @@ def test_account_equity_degrades_gracefully():
     old = report_web.EXEC_PATH
     report_web.EXEC_PATH = "/nonexistent/executions.csv"
     try:
-        assert daily_signal.account_equity(pd.Series({"510300": 1.0})) is None
+        assert daily_signal.account_state(pd.Series({"510300": 1.0})) is None
     finally:
         report_web.EXEC_PATH = old
     restore = _with_ledger(HEADER
                            + "2026-01-05,入金,,,,10000,,已成交\n"
                            + "2026-01-06,买入,512880,1.0,1000,,,已成交\n")
     try:
-        assert daily_signal.account_equity(pd.Series({"510300": 1.0})) is None
+        assert daily_signal.account_state(pd.Series({"510300": 1.0})) is None
     finally:
         restore()
 
