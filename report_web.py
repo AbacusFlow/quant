@@ -119,13 +119,22 @@ def metric_cards(title: str, m: dict) -> str:
 def build_equity_chart(equity: pd.Series, bench: pd.Series, ew: pd.Series,
                        title: str, log_scale: bool,
                        extras: list[tuple[str, pd.Series]] | None = None,
-                       main_label: str = "ETF动量轮动(本策略)") -> str:
-    """净值对比图;extras 为历史版本变体曲线 [(标签, 净值序列)],细虚线绘制。
+                       main_label: str = "ETF动量轮动(本策略)",
+                       pool: pd.DataFrame | None = None) -> str:
+    """净值对比图;extras 为历史版本变体曲线 [(标签, 净值序列)],细虚线绘制;
+    pool 为池内各 ETF 收盘表,逐只画细半透明"买入持有"曲线作个体基准。
 
     最新线上策略永远是红色粗线,变体/基准用其他颜色区分。
     """
-    fig, ax = plt.subplots(figsize=(11, 5))
-    ax.plot(equity.index, equity / equity.iloc[0], label=main_label, linewidth=1.8, color="#d62728")
+    fig, ax = plt.subplots(figsize=(11, 5.5))
+    if pool is not None:
+        cmap = plt.get_cmap("tab20")
+        for i, s in enumerate(pool.columns):
+            series = pool[s].dropna()
+            if len(series) >= 2:
+                ax.plot(series.index, series / series.iloc[0], linewidth=0.7, alpha=0.5,
+                        color=cmap(i % 20), label=f"{config.ETF_POOL.get(s, s)} 持有")
+    ax.plot(equity.index, equity / equity.iloc[0], label=main_label, linewidth=2.0, color="#d62728")
     extra_colors = ["#999999", "#4c72b0", "#8c564b"]
     for i, (label, series) in enumerate(extras or []):
         s = series.dropna()
@@ -133,12 +142,13 @@ def build_equity_chart(equity: pd.Series, bench: pd.Series, ew: pd.Series,
             ax.plot(s.index, s / s.iloc[0], label=label, linewidth=1.1,
                     linestyle="--", color=extra_colors[i % len(extra_colors)])
     b = bench.dropna()
-    ax.plot(b.index, b / b.iloc[0], label="沪深300 买入持有(不操作)", linewidth=1.3, color="#7f7f7f")
-    ax.plot(ew.index, ew / ew.iloc[0], label="ETF池等权 买入持有(不操作)", linewidth=1.3, color="#1f77b4", alpha=0.8)
+    ax.plot(b.index, b / b.iloc[0], label="沪深300 买入持有(不操作)", linewidth=1.4, color="#333333")
+    ax.plot(ew.index, ew / ew.iloc[0], label="ETF池等权 买入持有(不操作)", linewidth=1.4,
+            color="#1f77b4", alpha=0.9)
     if log_scale:
         ax.set_yscale("log")
     ax.set_title(title)
-    ax.legend(fontsize=9)
+    ax.legend(fontsize=7 if pool is not None else 9, ncol=2 if pool is not None else 1)
     ax.grid(alpha=0.3)
     return fig_to_b64(fig)
 
@@ -377,6 +387,21 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
         return (f'<h2>实盘 vs 模拟</h2><p class="note">尚无已成交记录(仅有待执行计划,'
                 f'见下表)。</p>{exec_table(execs)}{guide}')
 
+    # 今日成交已记录但行情尚未更新(akshare 收盘后 ~22:00 才出当日K)时,
+    # 不再整段报「实盘净值计算失败」——把晚于最新行情的成交暂时排除,
+    # 照常显示截至上一交易日的净值/持仓,并加说明;行情更新后自动包含
+    last_quote = closes.index[-1]
+    omitted = confirmed[confirmed["date"] > last_quote]
+    stale_note = ""
+    if not omitted.empty:
+        confirmed = confirmed[confirmed["date"] <= last_quote]
+        stale_note = (f'<p class="note">⚠ 已记录 {len(omitted)} 笔 '
+                      f'{omitted["date"].min().date()} 的成交,但行情尚未更新到当日;'
+                      f'下方实盘数据显示截至 <b>{last_quote.date()}</b> 收盘,'
+                      f'今晚行情更新后自动纳入。</p>')
+        if confirmed.empty:
+            return (f'<h2>实盘 vs 模拟</h2>{stale_note}{exec_table(execs)}{guide}')
+
     # 池外标的(误买)的收盘价不在轮动 closes 表里,按需补列用于净值计算
     # ——只补「曾隔夜持有」的标的(当日买卖光的纠错标的日终恒 0 不参与计价)
     extra = sorted(overnight_held_symbols(confirmed, closes.index) - set(closes.columns))
@@ -438,7 +463,7 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
              f'「份额化收益」= 策略每份资金的历史表现(入金时点不影响),用于与模拟盘/基准公平对比。'
              f'两者可能一正一负,都是对的,回答的问题不同。</p>')
 
-    return (f'<h2>实盘 vs 模拟</h2>{cards}'
+    return (f'<h2>实盘 vs 模拟</h2>{stale_note}{cards}'
             f'<img src="data:image/png;base64,{img}" alt="实盘净值">'
             f'<h3>成交流水(最近 30 条,含待执行计划)</h3>'
             f'{exec_table(execs)}'
@@ -474,9 +499,18 @@ def holdings_vs_target_html(closes: pd.DataFrame, weights: pd.DataFrame) -> str:
         confirmed = execs[execs["status"] != "计划"]
         if confirmed.empty or closes.empty or weights.empty:
             return ""
-        # 流水日期晚于最新行情 → 无法用当日收盘可靠计价(同 real_equity_series 口径),返回空串
-        if (confirmed["date"] > closes.index[-1]).any():
-            return ""
+        # 今日成交已记录但行情未更新:暂时排除、按上一交易日口径展示并加说明
+        # (行情更新后自动纳入),不再整段消失
+        stale_note = ""
+        omitted = confirmed[confirmed["date"] > closes.index[-1]]
+        if not omitted.empty:
+            confirmed = confirmed[confirmed["date"] <= closes.index[-1]]
+            if confirmed.empty:
+                return ""
+            stale_note = (f'<p class="note">⚠ 已记录 {len(omitted)} 笔 '
+                          f'{omitted["date"].min().date()} 的成交,行情尚未更新;'
+                          f'本表按 <b>{closes.index[-1].date()}</b> 收盘与当时持仓计算,'
+                          f'今晚行情更新后自动纳入。</p>')
         pos, cash = replay_positions(confirmed)
 
         last = closes.iloc[-1]
@@ -544,7 +578,7 @@ def holdings_vs_target_html(closes: pd.DataFrame, weights: pd.DataFrame) -> str:
             rows += (f'<tr><td>现金</td><td>-</td><td>{cash:,.0f} 元</td>'
                      f'<td>{pct(cash / total, signed=False)}</td><td>-</td><td>-</td><td>-</td></tr>')
 
-        return (f'<h2>实际持仓 vs 策略目标(据此决定是否手动调仓)</h2>'
+        return (f'<h2>实际持仓 vs 策略目标(据此决定是否手动调仓)</h2>{stale_note}'
                 f'<p class="note">「实际持仓」来自已成交流水,「策略目标」为最新信号权重'
                 f'(当前线上口径)。你已选择<b>维持现状</b>,下表仅作提醒:若要对齐策略,'
                 f'可参考「参考调整」列手动下单(T+1 开盘、100 股整手;偏离在 2% 总资产以内可忽略)。'
@@ -753,7 +787,7 @@ def main():
     # 图表
     img_full = build_equity_chart(equity, bench, ew,
                                   f"全区间净值对比({equity.index[0].date()} ~ {equity.index[-1].date()},对数坐标)",
-                                  log_scale=True)
+                                  log_scale=True, pool=closes)
     one_year = equity.index[-1] - pd.Timedelta(days=365)
     if args.vol_target and args.sleeve:
         main_label_1y = "V2 本策略(波动目标+防御sleeve)【最新】"
@@ -767,7 +801,7 @@ def main():
                                 "近一年净值对比(含历史版本变体)" if variant_extras else "近一年净值对比",
                                 log_scale=False,
                                 extras=[(lb, s.loc[one_year:]) for lb, s in variant_extras],
-                                main_label=main_label_1y)
+                                main_label=main_label_1y, pool=closes.loc[one_year:])
 
     # 操作明细(近一年)
     segs = holding_segments(weights, equity, bench, ew)
