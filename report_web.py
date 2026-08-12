@@ -116,6 +116,32 @@ def metric_cards(title: str, m: dict) -> str:
     return f'<h3>{title}</h3><div class="cards">{cards}</div>'
 
 
+def _end_labels(ax, entries: list[tuple[float, str, object]], log_scale: bool = False) -> None:
+    """在各曲线右端外侧直接标注名称(颜色与线一致):按终值排序、防重叠上推。
+
+    entries: [(终值, 标签, 颜色)]。须在所有 plot 之后调用(依赖最终 ylim);
+    fig_to_b64 的 bbox_inches="tight" 会把轴外文本一并纳入画布。
+    """
+    if not entries:
+        return
+    import numpy as np
+    ymin, ymax = ax.get_ylim()
+
+    def frac(y: float) -> float:
+        try:
+            if log_scale and ymin > 0:
+                return float((np.log(y) - np.log(ymin)) / (np.log(ymax) - np.log(ymin)))
+            return float((y - ymin) / (ymax - ymin))
+        except Exception:
+            return 0.5
+    last = -1.0
+    for f, label, color in sorted((frac(y), lb, c) for y, lb, c in entries):
+        f = max(f, last + 0.027)  # 最小间距,重叠时向上错开
+        ax.text(1.006, f, label, transform=ax.transAxes, fontsize=6.5,
+                color=color, va="center")
+        last = f
+
+
 def build_equity_chart(equity: pd.Series, bench: pd.Series, ew: pd.Series,
                        title: str, log_scale: bool,
                        extras: list[tuple[str, pd.Series]] | None = None,
@@ -126,30 +152,44 @@ def build_equity_chart(equity: pd.Series, bench: pd.Series, ew: pd.Series,
 
     最新线上策略永远是红色粗线,变体/基准用其他颜色区分。
     """
-    fig, ax = plt.subplots(figsize=(11, 5.5))
+    fig, ax = plt.subplots(figsize=(11.5, 5.5))
+    labels: list[tuple[float, str, object]] = []  # 线端标注:(终值, 名称, 颜色)
     if pool is not None:
         cmap = plt.get_cmap("tab20")
         for i, s in enumerate(pool.columns):
             series = pool[s].dropna()
             if len(series) >= 2:
-                ax.plot(series.index, series / series.iloc[0], linewidth=0.7, alpha=0.5,
-                        color=cmap(i % 20), label=f"{config.ETF_POOL.get(s, s)} 持有")
-    ax.plot(equity.index, equity / equity.iloc[0], label=main_label, linewidth=2.0, color="#d62728")
+                norm = series / series.iloc[0]
+                color = cmap(i % 20)
+                ax.plot(norm.index, norm, linewidth=0.7, alpha=0.5, color=color)
+                labels.append((float(norm.iloc[-1]), config.ETF_POOL.get(s, s), color))
+    eq_norm = equity / equity.iloc[0]
+    ax.plot(eq_norm.index, eq_norm, label=main_label, linewidth=2.0, color="#d62728")
+    labels.append((float(eq_norm.iloc[-1]), "★本策略", "#d62728"))
     extra_colors = ["#999999", "#4c72b0", "#8c564b"]
     for i, (label, series) in enumerate(extras or []):
         s = series.dropna()
         if len(s) >= 2:
-            ax.plot(s.index, s / s.iloc[0], label=label, linewidth=1.1,
-                    linestyle="--", color=extra_colors[i % len(extra_colors)])
+            color = extra_colors[i % len(extra_colors)]
+            norm = s / s.iloc[0]
+            ax.plot(norm.index, norm, label=label, linewidth=1.1, linestyle="--", color=color)
+            labels.append((float(norm.iloc[-1]), label.split("(")[0], color))
     b = bench.dropna()
-    ax.plot(b.index, b / b.iloc[0], label="沪深300 买入持有(不操作)", linewidth=1.4, color="#333333")
-    ax.plot(ew.index, ew / ew.iloc[0], label="ETF池等权 买入持有(不操作)", linewidth=1.4,
-            color="#1f77b4", alpha=0.9)
+    b_norm = b / b.iloc[0]
+    ax.plot(b_norm.index, b_norm, label="沪深300 买入持有(不操作)", linewidth=1.4, color="#333333")
+    labels.append((float(b_norm.iloc[-1]), "沪深300", "#333333"))
+    e = ew.dropna()
+    if len(e) >= 2:
+        e_norm = e / e.iloc[0]
+        ax.plot(e_norm.index, e_norm, label="ETF池等权 买入持有(不操作)", linewidth=1.4,
+                color="#1f77b4", alpha=0.9)
+        labels.append((float(e_norm.iloc[-1]), "ETF池等权", "#1f77b4"))
     if log_scale:
         ax.set_yscale("log")
     ax.set_title(title)
-    ax.legend(fontsize=7 if pool is not None else 9, ncol=2 if pool is not None else 1)
+    ax.legend(fontsize=8, loc="upper left")  # 图例只留主线;池内个股看右侧线端标注
     ax.grid(alpha=0.3)
+    _end_labels(ax, labels, log_scale)
     return fig_to_b64(fig)
 
 
@@ -427,19 +467,37 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
     start = real_eq.index[0]
     sim = sim_equity.loc[start:]
     b = bench.loc[start:].dropna()
-    fig, ax = plt.subplots(figsize=(11, 5))
-    ax.plot(navs.index, navs, label="实盘账户(份额化净值,追加资金不扭曲)", linewidth=1.8, color="#d62728")
+    fig, ax = plt.subplots(figsize=(11.5, 5.5))
+    labels: list[tuple[float, str, object]] = []
+    # 池内各 ETF 自实盘起始日的买入持有细线(个体基准)
+    cmap = plt.get_cmap("tab20")
+    for i, s in enumerate(k for k in config.ETF_POOL if k in closes.columns):
+        ser = closes[s].loc[start:].dropna()
+        if len(ser) >= 2:
+            norm = ser / ser.iloc[0]
+            color = cmap(i % 20)
+            ax.plot(norm.index, norm, linewidth=0.7, alpha=0.5, color=color)
+            labels.append((float(norm.iloc[-1]), config.ETF_POOL[s], color))
+    ax.plot(navs.index, navs, label="实盘账户(份额化净值,追加资金不扭曲)", linewidth=2.0, color="#d62728")
+    labels.append((float(navs.iloc[-1]), "★实盘", "#d62728"))
     if len(sim) >= 2:
-        ax.plot(sim.index, sim / sim.iloc[0], label="模拟盘(策略理论执行)", linewidth=1.3,
+        sim_norm = sim / sim.iloc[0]
+        ax.plot(sim_norm.index, sim_norm, label="模拟盘(策略理论执行)", linewidth=1.3,
                 color="#ff9896", linestyle="--")
+        labels.append((float(sim_norm.iloc[-1]), "模拟盘", "#ff9896"))
     if len(b) >= 2:
-        ax.plot(b.index, b / b.iloc[0], label="沪深300(不操作)", linewidth=1.2, color="#7f7f7f")
+        b_norm = b / b.iloc[0]
+        ax.plot(b_norm.index, b_norm, label="沪深300(不操作)", linewidth=1.4, color="#333333")
+        labels.append((float(b_norm.iloc[-1]), "沪深300", "#333333"))
     e = ew.loc[start:].dropna()
     if len(e) >= 2:
-        ax.plot(e.index, e / e.iloc[0], label="ETF池等权(不操作)", linewidth=1.2,
-                color="#1f77b4", alpha=0.8)
-    ax.set_title(f"实盘净值对比(自 {start.date()},起始净值 1.0)")
-    ax.legend(); ax.grid(alpha=0.3)
+        e_norm = e / e.iloc[0]
+        ax.plot(e_norm.index, e_norm, label="ETF池等权(不操作)", linewidth=1.4,
+                color="#1f77b4", alpha=0.9)
+        labels.append((float(e_norm.iloc[-1]), "ETF池等权", "#1f77b4"))
+    ax.set_title(f"实盘净值对比(自 {start.date()},起始净值 1.0;细线=池内各 ETF 买入持有)")
+    ax.legend(fontsize=8, loc="upper left"); ax.grid(alpha=0.3)
+    _end_labels(ax, labels)
     img = fig_to_b64(fig)
 
     real_ret = navs.iloc[-1] - 1  # 份额化(TWR)收益,不受入金/出金时点影响
