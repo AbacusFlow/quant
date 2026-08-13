@@ -78,9 +78,10 @@ def build_weights(closes: pd.DataFrame, mode: str, lookback: int, buffer: float,
 
 def run_once(prices: dict[str, pd.DataFrame], lookback: int, buffer: float,
              mode: str = "single", dd_control: bool = False,
-             capital: float = config.INITIAL_CAPITAL, vol_control: bool = False) -> tuple:
+             capital: float = config.INITIAL_CAPITAL, vol_control: bool = False,
+             sleeve: bool = False) -> tuple:
     closes = closes_table(prices)
-    weights = build_weights(closes, mode, lookback, buffer, dd_control, vol_control)
+    weights = build_weights(closes, mode, lookback, buffer, dd_control, vol_control, sleeve)
     result = run_portfolio_backtest(prices, weights, initial_capital=capital, stamp_tax=False)
     return result, weights
 
@@ -100,6 +101,8 @@ def main():
                         help="开启回撤控制(回测显示年化损耗约3%%、回撤仅改善约2pp,默认关闭)")
     parser.add_argument("--vol-target", action="store_true",
                         help="开启波动率目标覆盖层(研究显示夏普↑/回撤↓、年化基本不变,默认关闭)")
+    parser.add_argument("--sleeve", action="store_true",
+                        help="开启防御 sleeve:把滤空/降仓留下的现金按各半买入黄金+国债ETF(默认关闭)")
     parser.add_argument("--compare", action="store_true", help="对比 单一/集成/集成+回撤控制")
     args = parser.parse_args()
 
@@ -115,7 +118,8 @@ def main():
         rows = []
         for label, mode, dd in variants:
             result, _ = run_once(prices, args.lookback, args.buffer, mode=mode, dd_control=dd,
-                                 capital=args.capital, vol_control=args.vol_target)
+                                 capital=args.capital, vol_control=args.vol_target,
+                                 sleeve=args.sleeve)
             m = metrics_mod.equity_metrics(result.equity)
             oos = result.equity.loc[config.OOS_SPLIT:]
             m_oos = metrics_mod.equity_metrics(oos) if len(oos) >= 2 else None
@@ -137,7 +141,7 @@ def main():
         rows = []
         for lb in (10, 15, 20, 25, 30, 40, 60):
             result, _ = run_once(prices, lb, args.buffer, mode="single", capital=args.capital,
-                                 vol_control=args.vol_target)
+                                 vol_control=args.vol_target, sleeve=args.sleeve)
             m = metrics_mod.equity_metrics(result.equity)
             oos = result.equity.loc[config.OOS_SPLIT:]
             m_oos = metrics_mod.equity_metrics(oos) if len(oos) >= 2 else None
@@ -155,11 +159,14 @@ def main():
 
     dd_control = args.dd
     result, weights = run_once(prices, args.lookback, args.buffer, mode=args.mode, dd_control=dd_control,
-                               capital=args.capital, vol_control=args.vol_target)
+                               capital=args.capital, vol_control=args.vol_target,
+                               sleeve=args.sleeve)
     equity = result.equity
 
     desc = (f"mode={args.mode}, 回撤控制={'开' if dd_control else '关'}, "
-            f"波动率目标={'开' if args.vol_target else '关'}, buffer={args.buffer}, 本金={args.capital:,.0f}")
+            f"波动率目标={'开' if args.vol_target else '关'}, "
+            f"防御sleeve={'开' if args.sleeve else '关'}, "
+            f"buffer={args.buffer}, 本金={args.capital:,.0f}")
     if args.mode == "single":
         desc += f", lookback={args.lookback}"
     print(f"\n========== ETF 动量轮动 ({desc}) ==========")
