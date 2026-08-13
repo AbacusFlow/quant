@@ -165,6 +165,47 @@ def test_sleeve_no_lookahead():
     assert np.allclose(full.iloc[:80].values, part.values)
 
 
+def _buffer_frame() -> pd.DataFrame:
+    """构造换仓缓冲的边界场景(lookback=1,动量即当日涨幅)。
+
+    d1: A +10% / B 0%     → 建仓 A
+    d2: A +1%  / B +1.5%  → B 仅领先 0.5pp
+    d3: A +1%  / B +4%    → B 领先 3pp
+    """
+    idx = pd.date_range("2024-01-01", periods=4, freq="B")
+    return pd.DataFrame({
+        "A": [100.0, 110.0, 111.1, 112.211],
+        "B": [100.0, 100.0, 101.5, 105.56],
+    }, index=idx)
+
+
+def test_rotation_buffer_blocks_marginal_switch():
+    """领先幅度小于 buffer 时不得换仓,大于 buffer 才换(锁定阈值语义)"""
+    closes = _buffer_frame()
+    w = etf_momentum_rotation(closes, lookback=1, buffer=0.02)
+    assert w.iloc[1]["A"] == 1.0                             # 建仓 A
+    assert w.iloc[2]["A"] == 1.0 and w.iloc[2]["B"] == 0.0   # 领先 0.5pp < 2pp,不换
+    assert w.iloc[3]["B"] == 1.0 and w.iloc[3]["A"] == 0.0   # 领先 3pp > 2pp,换仓
+
+
+def test_rotation_smaller_buffer_switches_earlier():
+    """同一场景下 buffer 更小会更早换仓 —— 证明差异确实由 buffer 驱动"""
+    closes = _buffer_frame()
+    w = etf_momentum_rotation(closes, lookback=1, buffer=0.004)
+    assert w.iloc[2]["B"] == 1.0                             # 0.5pp 领先即触发换仓
+
+
+def test_rotation_default_buffer_follows_config():
+    """函数默认值必须跟随 config,避免直接调用时用到过期阈值"""
+    import inspect
+
+    import config
+
+    for fn in (etf_momentum_rotation, etf_momentum_ensemble):
+        default = inspect.signature(fn).parameters["buffer"].default
+        assert default == config.ROTATION_BUFFER, (fn.__name__, default)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

@@ -6,6 +6,8 @@
 import numpy as np
 import pandas as pd
 
+import config
+
 
 def dual_ma_signal(df: pd.DataFrame, short: int = 5, long: int = 20) -> pd.Series:
     """双均线:MA(short) 上穿 MA(long) 买入(金叉),下穿卖出(死叉)。"""
@@ -76,7 +78,7 @@ def buy_and_hold_signal(df: pd.DataFrame) -> pd.Series:
 def etf_momentum_rotation(
     closes: pd.DataFrame,
     lookback: int = 20,
-    buffer: float = 0.01,
+    buffer: float = config.ROTATION_BUFFER,
 ) -> pd.DataFrame:
     """ETF 动量轮动:持有过去 lookback 日涨幅最高的 ETF(top-1)。
 
@@ -115,7 +117,7 @@ def etf_momentum_rotation(
 def etf_momentum_ensemble(
     closes: pd.DataFrame,
     lookbacks: tuple[int, ...] = (15, 20, 25),
-    buffer: float = 0.01,
+    buffer: float = config.ROTATION_BUFFER,
 ) -> pd.DataFrame:
     """多周期集成轮动:多个 lookback 子策略各占等权,降低单一参数过拟合风险。
 

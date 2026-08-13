@@ -32,6 +32,8 @@ docker run --rm -v "$PWD":/work quant python test_strategy.py      # rotation/en
 docker run --rm -v "$PWD":/work quant python test_data.py          # cache-poison guard / tencent paging / qfq_only(离线伪造数据源)
 docker run --rm -v "$PWD":/work quant python test_ledger.py        # 账本现金流规则 + account_equity fail-closed
 docker run --rm -v "$PWD":/work quant python test_check_prices.py  # 昨收校验判定逻辑
+docker run --rm -v "$PWD":/work quant python test_plan_orders.py   # 调仓建议(引擎口径/带宽/现金封顶)
+docker run --rm -v "$PWD":/work quant python scripts/test_experiment_buffer.py  # 研究脚本的区间边界逻辑
 ```
 
 No linters configured.
