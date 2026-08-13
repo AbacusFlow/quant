@@ -126,23 +126,24 @@ data.py → strategy.py → backtest.py (单标的)  → metrics.py / report.py
 
 ```bash
 docker build -f .docker/Dockerfile -t quant .
-R="docker run --rm --network=host -v $PWD:/work quant python"
+# bash / zsh 通用
+q() { docker run --rm --network=host -v "$PWD":/work quant python "$@"; }
 
 # 复现「三版本对比」整张表(V0/V1/V2 同一口径,打印数据指纹)
-$R scripts/experiment_variants.py --capital 185000 --end 2026-08-12
+q scripts/experiment_variants.py --capital 185000 --end 2026-08-12
 
 # 单跑 V2(当前线上配置)。覆盖层默认关闭,必须显式打开
-$R run_rotation.py --mode ensemble --capital 185000 --vol-target --sleeve --end 2026-08-12
+q run_rotation.py --mode ensemble --capital 185000 --vol-target --sleeve --end 2026-08-12
 
 # 回看周期敏感性扫描 / 变体对比
-$R run_rotation.py --sensitivity
-$R run_rotation.py --compare
+q run_rotation.py --sensitivity
+q run_rotation.py --compare
 
 # 每日信号(开盘前跑,用昨收)
-$R daily_signal.py --mode ensemble --capital 185000 --vol-target --sleeve
+q daily_signal.py --mode ensemble --capital 185000 --vol-target --sleeve
 
 # 生成报告页
-$R report_web.py --mode ensemble --capital 185000 --vol-target --sleeve
+q report_web.py --mode ensemble --capital 185000 --vol-target --sleeve
 ```
 
 **注意:代码里的默认值不是线上配置。** `config.py` 的 `VOL_TARGET_ENABLED` / `SLEEVE_ENABLED` 都是 `False`;`daily_signal.py` / `report_web.py` / `check_risk.py` 的 `--mode` 默认 `single`,`report_web.py` / `check_risk.py` 的 `--capital` 默认 1 万,而 `daily_signal.py --capital` 默认是 `None`——它优先用账本回放出的真实资产,`--capital` 只在账本回放不出资产时兜底。作者线上跑的 V2 来自未入库的 `.env`(见 `.env.example`),由 `scripts/daily_local.sh` 读出后传给这些脚本。不传上面那几个 flag 跑出来的就不是 V2。
