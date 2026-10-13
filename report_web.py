@@ -385,6 +385,63 @@ def real_equity_series(execs: pd.DataFrame, closes: pd.DataFrame) -> tuple[pd.Se
     return equity, navs, net_deposit
 
 
+def compliance_series(prices: dict[str, pd.DataFrame], confirmed: pd.DataFrame,
+                      start: pd.Timestamp, end: pd.Timestamp,
+                      log_path: str | None = None) -> tuple[pd.Series, pd.Series, float]:
+    """「完全照做」账户:每天按当时**实际推送**的目标权重(signal_log,而非现行规则回溯)
+    T+1 开盘执行(引擎口径:整手/滑点/佣金/带宽),入金/出金与真实账本同日同额。
+
+    返回 (每日总资产, 份额化净值 NAV, 累计净入金),区间 [start, end],口径同 real_equity_series。
+    同一 signal_date 有多条(如盘中手动切模式补记)时取**最早**一条=当时开盘前实际推送的版本,
+    避免把后补版本提前到开盘执行(前视)。
+    日志为空/不覆盖起始日前一交易日/起始日前无行情/含无行情标的 → ValueError(不静默画错线:
+    「没有记录」不等于「推送了空仓」)。
+    """
+    log_path = log_path or os.path.join(config.OUTPUT_DIR, "signal_log.csv")
+    log = pd.read_csv(log_path, encoding="utf-8-sig", dtype={"signal_date": str})
+    log["signal_date"] = pd.to_datetime(log["signal_date"])
+    syms = [c for c in log.columns if c not in ("run_date", "signal_date", "mode", "desc")]
+    missing = [s for s in syms if s not in prices]
+    if missing:
+        raise ValueError(f"信号日志含无行情标的 {missing}")
+    if log.empty:
+        raise ValueError("信号日志为空")
+    sig = (log.drop_duplicates("signal_date", keep="first").set_index("signal_date")[syms]
+           .astype(float).fillna(0.0).sort_index())
+
+    cal = closes_table({s: prices[s] for s in syms}).index
+    cal = cal[cal <= end]
+    i0 = int(cal.searchsorted(start)) - 1  # 含起始日前一交易日:首日执行其信号
+    if i0 < 0:
+        raise ValueError(f"缺少 {start.date()} 前一交易日行情,无法回放首日执行")
+    if sig.index[0] > cal[i0]:
+        raise ValueError(f"信号日志始于 {sig.index[0].date()},未覆盖起始日前一交易日 {cal[i0].date()}")
+    days = cal[i0:]
+    weights = sig.reindex(days.union(sig.index)).ffill().reindex(days).fillna(0.0)
+
+    fl = confirmed[confirmed["action"].isin(("deposit", "withdraw"))]
+    flows = pd.Series(fl["amount"].astype(float).to_numpy(), index=pd.DatetimeIndex(fl["date"]))
+    flows[fl["action"].to_numpy() == "withdraw"] *= -1
+    flows = flows.sort_index()
+
+    res = run_portfolio_backtest({s: prices[s] for s in syms}, weights, initial_capital=0.0,
+                                 stamp_tax=False, cash_flows=flows)
+    equity = res.equity.loc[start:]
+    # 份额化 NAV:流水按日初(前一日 NAV)折份额,与 real_equity_series 同口径
+    pos = equity.index.searchsorted(flows.index)
+    flow_day = pd.Series(0.0, index=equity.index)
+    for p, v in zip(pos, flows.to_numpy()):
+        if p < len(equity):
+            flow_day.iloc[p] += v
+    units, nav, navs = 0.0, 1.0, pd.Series(index=equity.index, dtype=float)
+    for day, eq in equity.items():
+        units += flow_day.at[day] / nav
+        if units > 1e-9:
+            nav = eq / units
+        navs.at[day] = nav
+    return equity, navs, float(flows[flows.index <= equity.index[-1]].sum())
+
+
 def exec_table(execs: pd.DataFrame) -> str:
     """成交流水表(计划行灰显标注)"""
     act_cn = {"buy": "买入", "sell": "卖出", "deposit": "入金", "withdraw": "出金"}
@@ -405,7 +462,7 @@ def exec_table(execs: pd.DataFrame) -> str:
 
 
 def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Series,
-                      ew: pd.Series) -> str:
+                      ew: pd.Series, prices: dict[str, pd.DataFrame] | None = None) -> str:
     """实盘板块 HTML;无记录给操作指引,解析失败给出错误而不中断整页生成。"""
     guide = ('<p class="note">记录方法:在 GitHub 编辑 <code>output/executions.csv</code>,'
              '列为 date,action,symbol,price,shares,amount,note,status。'
@@ -465,6 +522,14 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
                 f'{html.escape(str(e))}</p>{guide}')
 
     start = real_eq.index[0]
+    comp_eq = comp_nav = None
+    comp_err = ""
+    if prices is not None:
+        try:
+            comp_eq, comp_nav, comp_dep = compliance_series(prices, confirmed, start, real_eq.index[-1])
+        except Exception as e:  # 展示附加线:失败只提示,不影响实盘板块
+            comp_err = (f'<p class="note" style="color:#c00">「完全照做」线计算失败:'
+                        f'{html.escape(str(e))}</p>')
     sim = sim_equity.loc[start:]
     b = bench.loc[start:].dropna()
     fig, ax = plt.subplots(figsize=(11.5, 5.5))
@@ -480,9 +545,13 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
             labels.append((float(norm.iloc[-1]), config.ETF_POOL[s], color))
     ax.plot(navs.index, navs, label="实盘账户(份额化净值,追加资金不扭曲)", linewidth=2.0, color="#d62728")
     labels.append((float(navs.iloc[-1]), "★实盘", "#d62728"))
+    if comp_nav is not None and len(comp_nav) >= 2:
+        ax.plot(comp_nav.index, comp_nav, label="完全照做(每日推送指令全部按时执行)",
+                linewidth=1.8, color="#2ca02c")
+        labels.append((float(comp_nav.iloc[-1]), "完全照做", "#2ca02c"))
     if len(sim) >= 2:
         sim_norm = sim / sim.iloc[0]
-        ax.plot(sim_norm.index, sim_norm, label="模拟盘(策略理论执行)", linewidth=1.3,
+        ax.plot(sim_norm.index, sim_norm, label="模拟盘(现行规则回溯)", linewidth=1.3,
                 color="#ff9896", linestyle="--")
         labels.append((float(sim_norm.iloc[-1]), "模拟盘", "#ff9896"))
     if len(b) >= 2:
@@ -515,11 +584,32 @@ def real_account_html(closes: pd.DataFrame, sim_equity: pd.Series, bench: pd.Ser
              f'<div class="card-value {color_cls(real_ret)}">{pct(real_ret)}</div></div>'
              f'<div class="card"><div class="card-label">同期模拟盘</div>'
              f'<div class="card-value {color_cls(sim_ret)}">{pct(sim_ret)}</div></div>'
-             f'<div class="card"><div class="card-label">执行偏差(实盘-模拟)</div>'
+             f'<div class="card"><div class="card-label">规则偏差(实盘-现行规则回溯)</div>'
              f'<div class="card-value {color_cls(real_ret - sim_ret)}">{pct(real_ret - sim_ret)}</div></div></div>'
              f'<p class="note">「绝对盈亏」= 你实际赚/亏的钱(简单差额,大额入金晚到则早期涨幅贡献小);'
              f'「份额化收益」= 策略每份资金的历史表现(入金时点不影响),用于与模拟盘/基准公平对比。'
              f'两者可能一正一负,都是对的,回答的问题不同。</p>')
+    if comp_eq is not None:
+        comp_pnl = float(comp_eq.iloc[-1]) - comp_dep
+        comp_ret = float(comp_nav.iloc[-1]) - 1
+        gap = float(real_eq.iloc[-1]) - float(comp_eq.iloc[-1])
+        cards += (f'<h3>如果完全照做</h3><div class="cards">'
+                  f'<div class="card"><div class="card-label">照做账户总资产</div>'
+                  f'<div class="card-value">{comp_eq.iloc[-1]:,.0f} 元</div></div>'
+                  f'<div class="card"><div class="card-label">照做绝对盈亏</div>'
+                  f'<div class="card-value {color_cls(comp_pnl)}">{comp_pnl:+,.0f} 元'
+                  f'({pct(comp_pnl / comp_dep if comp_dep > 0 else float("nan"))})</div></div>'
+                  f'<div class="card"><div class="card-label">照做累计收益(份额化)</div>'
+                  f'<div class="card-value {color_cls(comp_ret)}">{pct(comp_ret)}</div></div>'
+                  f'<div class="card"><div class="card-label">执行偏差(实盘-照做)</div>'
+                  f'<div class="card-value {color_cls(gap)}">{gap:+,.0f} 元'
+                  f'({pct(real_ret - comp_ret)})</div></div></div>'
+                  f'<p class="note">「完全照做」= 用与你相同的入金(同日同额),每天按当时<b>实际推送</b>的目标权重'
+                  f'(signal_log,不是事后用现行规则重算)在次日开盘执行,整手/佣金/万5滑点/2%带宽同回测引擎。'
+                  f'「执行偏差」主要反映执行环节(未照做/晚做/少做/成交价差),不含规则变更的影响;'
+                  f'另含少量模型误差:照做线按开盘价+万5滑点理想成交,且账本把 07-22 的 510500 分红'
+                  f'按入金记、而前复权行情已含分红,照做线因此约多计 500 元。</p>')
+    cards += comp_err
 
     return (f'<h2>实盘 vs 模拟</h2>{stale_note}{cards}'
             f'<img src="data:image/png;base64,{img}" alt="实盘净值">'
@@ -942,7 +1032,7 @@ img {{ max-width: 100%; background: #fff; border-radius: 6px; box-shadow: 0 1px 
 
 {strategy_explainer_html(args.mode, args.vol_target, args.sleeve)}
 
-{real_account_html(closes, equity, bench, ew)}
+{real_account_html(closes, equity, bench, ew, prices)}
 
 {holdings_vs_target_html(closes, weights)}
 

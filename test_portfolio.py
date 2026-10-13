@@ -150,6 +150,43 @@ def test_multi_buy_budget_order_independent():
     assert total_cost <= 100_000 + 1e-6
 
 
+def test_cash_flows_deposit_timing():
+    """入金当日开盘前到账即参与调仓;非交易日入金顺延;越界入金忽略;无流水时行为不变"""
+    prices = make_prices(5, price_a=10.0)
+    idx = prices["A"].index  # 2024-01-01(一)~01-05(五)
+    weights = pd.DataFrame(0.0, index=idx, columns=["A", "B"])
+    weights["A"] = 1.0
+    flows = pd.Series([10_000.0, 5_000.0, 7_000.0, 999.0],
+                      index=pd.to_datetime(["2023-12-30", "2024-01-03", "2024-01-03", "2024-01-08"]))
+    r = run_portfolio_backtest(prices, weights, initial_capital=0, slippage=0.0, rebalance_band=0.0,
+                               cash_flows=flows)
+    buys = [(t.date, t.shares) for t in r.trades if t.side == "buy"]
+    # 早于首日的入金并入首日,但首日目标=前一日信号(无)→ 第2日才买
+    assert buys[0] == (idx[1], 900)
+    # 01-03 两笔共 12000 当日到账并加仓
+    assert buys[1][0] == idx[2] and buys[1][1] == 1200
+    # 01-08 越界入金被忽略:总资产 = 22000 - 佣金
+    fees = sum(t.fee for t in r.trades)
+    assert abs(r.equity.iloc[-1] - (22_000 - fees)) < 1e-6
+    base = run_portfolio_backtest(prices, weights, initial_capital=50_000, slippage=0.0)
+    same = run_portfolio_backtest(prices, weights, initial_capital=50_000, slippage=0.0, cash_flows=None)
+    assert base.equity.equals(same.equity)
+
+
+def test_cash_flows_overdraw_raises():
+    """满仓时出金导致现金为负 → 报错而不是静默透支"""
+    prices = make_prices(3, price_a=10.0)
+    idx = prices["A"].index
+    weights = pd.DataFrame(0.0, index=idx, columns=["A", "B"])
+    weights["A"] = 1.0
+    flows = pd.Series([-5_000.0], index=[idx[2]])
+    try:
+        run_portfolio_backtest(prices, weights, initial_capital=10_000, slippage=0.0, cash_flows=flows)
+    except ValueError:
+        return
+    raise AssertionError("透支出金未报错")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

@@ -74,17 +74,29 @@ def run_portfolio_backtest(
     stamp_tax: bool = False,
     slippage: float = config.SLIPPAGE_RATE,
     rebalance_band: float = config.REBALANCE_BAND,
+    cash_flows: pd.Series | None = None,
 ) -> PortfolioResult:
     """逐日模拟组合调仓。
 
     prices: {symbol: DataFrame(open/close, 日期索引)}
     weights: 目标权重表(日期 x symbol),T 日收盘后的目标,T+1 开盘执行;行和应 <= 1
+    cash_flows: 可选入金(+)/出金(-)流水(日期索引,同日可多笔)。在该日(非交易日
+        顺延到下一交易日;早于首个交易日的并入首日)开盘前计入现金,当日即参与调仓;
+        晚于最后交易日的忽略。出金后现金为负即报错(不静默透支)。
     """
     symbols = list(weights.columns)
     index = align_prices(prices).intersection(weights.index).sort_values()
 
     # 当日执行的目标权重 = 前一日信号
     target = weights.reindex(index).shift(1).fillna(0.0)
+
+    flow_at = pd.Series(0.0, index=index)
+    if cash_flows is not None and len(index):
+        cf = cash_flows.dropna()
+        pos = index.searchsorted(pd.DatetimeIndex(cf.index))
+        for p, v in zip(pos, cf.to_numpy(dtype=float)):
+            if p < len(index):
+                flow_at.iloc[p] += v
 
     cash = initial_capital
     shares: dict[str, int] = {s: 0 for s in symbols}
@@ -95,6 +107,11 @@ def run_portfolio_backtest(
     for date in index:
         opens = {s: prices[s].at[date, "open"] for s in symbols}
         closes = {s: prices[s].at[date, "close"] for s in symbols}
+
+        if flow_at.at[date] != 0.0:
+            cash += flow_at.at[date]
+            if cash < -1e-9:
+                raise ValueError(f"{date.date()} 出金后现金为负({cash:.2f}),请检查资金流水")
 
         # 以开盘价计算当前总资产,得出各标的目标股数
         equity_open = cash + sum(shares[s] * opens[s] for s in symbols)
