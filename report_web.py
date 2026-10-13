@@ -2,7 +2,7 @@
 
 内容(回答"策略做了什么、后果如何、不操作会怎样"):
 - 结论横幅:最新信号 + 策略 vs 基准的样本外年化对比
-- 净值曲线:策略 vs 沪深300买入持有 vs ETF池等权持有(全区间 + 近一年)
+- 净值曲线:策略 vs 沪深300买入持有 vs ETF池等权持有(全区间 + 近半年)
 - 操作明细表:每段持仓(切换即一次操作)的区间收益 vs 同期沪深300,红绿标注
 - 指标卡片:全区间/样本外 年化、回撤、夏普
 - 模拟盘信号日志(output/signal_log.csv 末尾若干条)
@@ -902,7 +902,7 @@ def main():
     result = run_portfolio_backtest(prices, weights, initial_capital=args.capital, stamp_tax=False)
     equity = result.equity
 
-    # 历史版本变体曲线(近一年图用):仅当线上开了覆盖层才有对比意义
+    # 历史版本变体曲线(近半年图用):仅当线上开了覆盖层才有对比意义
     variant_extras = []
     if args.vol_target or args.sleeve:
         w_v0 = build_weights(closes, mode=args.mode, lookback=config.ROTATION_LOOKBACK,
@@ -945,11 +945,12 @@ def main():
         main_label_1y = "本策略(+防御sleeve)【最新】"
     else:
         main_label_1y = "ETF动量轮动(本策略)"
-    img_1y = build_equity_chart(equity.loc[one_year:], bench.loc[one_year:], ew.loc[one_year:],
-                                "近一年净值对比(含历史版本变体)" if variant_extras else "近一年净值对比",
+    half_year = equity.index[-1] - pd.DateOffset(months=6)
+    img_1y = build_equity_chart(equity.loc[half_year:], bench.loc[half_year:], ew.loc[half_year:],
+                                "近半年净值对比(含历史版本变体)" if variant_extras else "近半年净值对比",
                                 log_scale=False,
-                                extras=[(lb, s.loc[one_year:]) for lb, s in variant_extras],
-                                main_label=main_label_1y, pool=closes.loc[one_year:])
+                                extras=[(lb, s.loc[half_year:]) for lb, s in variant_extras],
+                                main_label=main_label_1y, pool=closes.loc[half_year:])
 
     # 操作明细(近一年)
     segs = holding_segments(weights, equity, bench, ew)
@@ -1048,7 +1049,7 @@ img {{ max-width: 100%; background: #fff; border-radius: 6px; box-shadow: 0 1px 
 
 <h2>净值对比:操作 vs 不操作</h2>
 <img src="data:image/png;base64,{img_full}" alt="全区间净值">
-<img src="data:image/png;base64,{img_1y}" alt="近一年净值">
+<img src="data:image/png;base64,{img_1y}" alt="近半年净值">
 
 <h2>策略操作明细(近一年,每次切换为一次操作)</h2>
 <p class="note">每段持仓的区间收益与同期基准对比。全历史跑赢同期沪深300的有 {seg_wins}/{seg_total} 段({seg_wins / seg_total:.0%}),跑赢同期ETF池等权的有 {seg_wins_ew}/{seg_total_ew} 段({seg_wins_ew / seg_total_ew:.0%})。</p>
