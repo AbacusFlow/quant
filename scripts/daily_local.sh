@@ -53,6 +53,8 @@ MODE="$(envval SIGNAL_MODE || true)"; MODE="${MODE:-single}"
 CAPITAL="$(envval SIGNAL_CAPITAL || true)"; CAPITAL="${CAPITAL:-10000}"
 VOL_TARGET="$(envval SIGNAL_VOL_TARGET || true)"; VOL_TARGET="${VOL_TARGET:-false}"
 SLEEVE="$(envval SIGNAL_SLEEVE || true)"; SLEEVE="${SLEEVE:-false}"
+# 影子模式:实盘暂停期间信号照常计算/记录/推送,但标题与正文标明「未执行」,防误下单
+SHADOW="$(envval SIGNAL_SHADOW || true)"; SHADOW="${SHADOW:-false}"
 
 # 开关 → flag(与线上一致:daily_signal / check_risk 同口径)
 if [ "$VOL_TARGET" = "true" ]; then VOL_FLAG="--vol-target"; else VOL_FLAG="--no-vol-target"; fi
@@ -81,6 +83,12 @@ flush_spool() {
             return 1
         fi
         body=$(cat "$f")
+        # 影子模式在**发送时**标记信号消息(含切换前已入队、未送达的滞留档),防误下单;已标记的不重复加
+        if [ "$SHADOW" = "true" ] && [ "${base#signal-}" != "$base" ] && [ "${body#【ETF量化·影子未执行】}" = "$body" ]; then
+            body="${body/#【ETF量化】/【ETF量化·影子未执行】}
+
+⚠ 影子模式:实盘暂停,以上仅供参考,请勿据此下单"
+        fi
         # token 经 -K- 配置管道传入,不上命令行(防 ps/cmdline 泄漏)
         resp=$(curl -sS --max-time 20 -K- \
             --data-urlencode "chat_id=${TG_CHAT_ID}" --data-urlencode "text=$body" \
