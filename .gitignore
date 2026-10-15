@@ -4,6 +4,7 @@ data/
 output/*
 !output/signal_log.csv
 !output/executions.csv
+!output/archive/
 site/
 .DS_Store
 .env
