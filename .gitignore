@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 data/
+!research/data/
 output/*
 !output/signal_log.csv
 !output/executions.csv
